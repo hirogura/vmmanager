@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+
+# 仮想環境
+venv/
+.venv/
+
+# データベース / 設定ファイル（個人情報を含む可能性があるもの）
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+*.env
+.env.*
+*.cfg
+*.conf.local
+
+# ログ
+*.log
+logs/
+
+# ランタイム生成物
+*.pid
+*.sock
+
+# OS 固有
+.DS_Store
+Thumbs.db
+
+# IDE / エディタ
+.idea/
+.vscode/
+*.swp

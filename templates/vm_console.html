@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<title>{{ vm_name }} - Console</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #181c24; color: #e2e8f0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; overflow: hidden; height: 100vh; display: flex; flex-direction: column; }
+.toolbar {
+    display: flex; align-items: center; gap: 6px; padding: 6px 12px;
+    background: #13161d; border-bottom: 1px solid #2d3340; z-index: 10; flex-wrap: wrap;
+}
+.toolbar h1 { font-size: 12px; font-weight: 600; margin-right: auto; }
+.toolbar .status { font-size: 10px; padding: 2px 6px; border-radius: 3px; }
+.toolbar .status.connected { background: rgba(34, 197, 94, 0.1); color: #22c55e; }
+.toolbar .status.connecting { background: rgba(245, 158, 11, 0.1); color: #f59e0b; }
+.toolbar .status.error { background: rgba(239, 68, 68, 0.1); color: #ef4444; }
+.toolbar button {
+    background: #252a35; color: #e2e8f0; border: 1px solid #374151;
+    padding: 3px 8px; border-radius: 3px; cursor: pointer; font-size: 11px; white-space: nowrap;
+}
+.toolbar button:hover { background: #2a2f3b; border-color: #4b5563; }
+.toolbar button.active { background: #3b82f6; border-color: #3b82f6; }
+.toolbar button:disabled { opacity: 0.4; cursor: default; }
+#console-container { flex: 1; display: flex; align-items: center; justify-content: center; position: relative; background: #000; overflow: hidden; }
+#console-container canvas { image-rendering: auto; }
+.loading { text-align: center; color: #64748b; font-size: 12px; }
+.loading .spinner { display: inline-block; width: 32px; height: 32px; border: 2px solid #374151; border-top-color: #3b82f6; border-radius: 50%; animation: spin 1s linear infinite; margin-bottom: 10px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="toolbar">
+    <h1>{{ vm_name }}</h1>
+    <span id="status" class="status connecting">接続中...</span>
+    <button id="btn-reconnect" disabled>再接続</button>
+    <button id="btn-cad" disabled>Ctrl+Alt+Del</button>
+    <button id="btn-paste" disabled>クリップボード</button>
+    <button id="btn-screen-off">画面Off</button>
+    <button onclick="doDisconnect(); window.close();">閉じる</button>
+</div>
+<div id="console-container">
+    <div class="loading" id="loading">
+        <div class="spinner"></div>
+        <div>VNCに接続中...</div>
+    </div>
+</div>
+
+<script type="module">
+import RFB from '/novnc/core/rfb.js';
+
+const vmName = "{{ vm_name }}";
+const statusEl = document.getElementById('status');
+const loading = document.getElementById('loading');
+const btnReconnect = document.getElementById('btn-reconnect');
+const btnCAD = document.getElementById('btn-cad');
+const btnPaste = document.getElementById('btn-paste');
+const btnScreenOff = document.getElementById('btn-screen-off');
+const container = document.getElementById('console-container');
+let rfb = null;
+let screenOffOverlay = null;
+let reconnectTimer = null;
+let wsPort = null;
+
+function setStatus(text, cls) {
+    statusEl.textContent = text;
+    statusEl.className = 'status ' + cls;
+}
+
+function setButtons(connected) {
+    btnCAD.disabled = !connected;
+    btnPaste.disabled = !connected;
+    btnReconnect.disabled = connected;
+}
+
+async function connect() {
+    try {
+        setStatus('プロキシ起動中...', 'connecting');
+        const resp = await fetch(`/api/vm/${vmName}/console-proxy`, { method: 'POST' });
+        const data = await resp.json();
+        if (data.error) { setStatus('エラー: ' + data.error, 'error'); return; }
+
+        wsPort = data.ws_port;
+        setStatus('接続中...', 'connecting');
+        const wsUrl = `ws://${location.hostname}:${wsPort}`;
+
+        rfb = new RFB(container, wsUrl, {
+            credentials: {},
+            wsProtocols: ['binary'],
+        });
+
+        rfb.scaleViewport = false;
+        rfb.resizeSession = false;
+        rfb.qualityLevel = 6;
+        rfb.compressionLevel = 2;
+        rfb.clipViewport = true;
+
+        rfb.addEventListener('connected', () => {
+            setStatus('接続済み', 'connected');
+            loading.style.display = 'none';
+            setButtons(true);
+        });
+        rfb.addEventListener('disconnected', (e) => {
+            const detail = e.detail || {};
+            const reason = detail.reason || '';
+            if (reason === 'Server disconnected') {
+                setStatus('切断 - 再接続中...', 'connecting');
+                scheduleReconnect(1000);
+            } else {
+                setStatus('切断', 'error');
+                setButtons(false);
+            }
+        });
+        rfb.addEventListener('failed', (e) => {
+            setStatus('接続失敗', 'error');
+            setButtons(false);
+        });
+    } catch (e) {
+        setStatus('エラー: ' + e.message, 'error');
+        setButtons(false);
+    }
+}
+
+function scheduleReconnect(delay) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(() => {
+        cleanup();
+        connect();
+    }, delay);
+}
+
+function cleanup() {
+    if (rfb) { rfb.disconnect(); rfb = null; }
+    container.querySelectorAll('canvas').forEach(c => c.remove());
+    loading.style.display = '';
+}
+
+function doDisconnect() {
+    clearTimeout(reconnectTimer);
+    cleanup();
+    fetch(`/api/vm/${vmName}/console-proxy`, { method: 'DELETE' }).catch(() => {});
+}
+
+btnReconnect.addEventListener('click', () => {
+    cleanup();
+    connect();
+});
+btnCAD.addEventListener('click', () => { if (rfb) rfb.sendCtrlAltDel(); });
+btnPaste.addEventListener('click', async () => {
+    const text = prompt('貼り付けテキスト:');
+    if (text && rfb) rfb.clipboardPasteFrom(text);
+});
+btnScreenOff.addEventListener('click', () => {
+    if (screenOffOverlay) {
+        screenOffOverlay.remove();
+        screenOffOverlay = null;
+        btnScreenOff.textContent = '画面Off';
+    } else {
+        screenOffOverlay = document.createElement('div');
+        screenOffOverlay.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;background:#000;z-index:5;cursor:pointer';
+        screenOffOverlay.title = 'クリックで画面を戻す';
+        screenOffOverlay.addEventListener('click', () => {
+            screenOffOverlay.remove();
+            screenOffOverlay = null;
+            btnScreenOff.textContent = '画面Off';
+        });
+        container.appendChild(screenOffOverlay);
+        btnScreenOff.textContent = '画面On';
+    }
+});
+
+window.addEventListener('beforeunload', () => { doDisconnect(); });
+connect();
+</script>
+</body>
+</html>

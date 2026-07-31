@@ -1,0 +1,1245 @@
+{% extends "base.html" %}
+{% block title %}{{ vm.name }} - VM Manager{% endblock %}
+{% block content %}
+<div class="detail-header">
+    <h1><i class="fas fa-desktop"></i> {{ vm.name }}</h1>
+    <span class="status-badge status-{{ vm.state }}">
+        <i class="fas fa-{{ 'circle-play' if vm.state == 'running' else 'circle-stop' }}"></i>
+        {{ '稼働中' if vm.state == 'running' else '停止中' }}
+    </span>
+    <span class="badge badge-info">{{ vm.domain_type|upper }}</span>
+    <span class="spacer"></span>
+    {% if not is_active %}
+    <button type="button" class="btn btn-secondary btn-sm" onclick="window.location.reload()"><i class="fas fa-times"></i> キャンセル</button>
+    <button type="button" id="save-btn-top" class="btn btn-primary btn-sm" onclick="document.getElementById('vm-form').dispatchEvent(new Event('submit'))"><i class="fas fa-save"></i> 保存</button>
+    {% endif %}
+    <div class="btn-group" style="margin-left:8px">
+        {% if vm.state == 'stopped' %}
+            <button class="btn btn-success btn-sm" onclick="vmAction('start')"><i class="fas fa-play"></i> 起動</button>
+        {% else %}
+            <button class="btn btn-warning btn-sm" onclick="vmAction('stop')"><i class="fas fa-stop"></i> 停止</button>
+            <button class="btn btn-danger btn-sm" onclick="vmAction('destroy')"><i class="fas fa-power-off"></i> 強制停止</button>
+            <button class="btn btn-info btn-sm" onclick="vmAction('reboot')"><i class="fas fa-redo"></i> 再起動</button>
+            <button class="btn btn-secondary btn-sm" onclick="vmAction('suspend')"><i class="fas fa-pause"></i> 一時停止</button>
+        {% endif %}
+        <button class="btn btn-secondary btn-sm" onclick="vmAction('resume')"><i class="fas fa-play-circle"></i> 再開</button>
+        <button class="btn btn-danger btn-sm" onclick="vmAction('undefine')"><i class="fas fa-trash"></i> 削除</button>
+    </div>
+</div>
+
+{% if is_active %}
+<div class="card console-card">
+    <div class="console-header">
+        <i class="fas fa-terminal" style="color:var(--text-muted)"></i>
+        <span style="flex:1;font-weight:500">VNC Console</span>
+        <span id="vnc-status" class="status connected">接続済み</span>
+        <div style="display:flex;gap:2px">
+            <button type="button" class="btn btn-secondary btn-sm vnc-size-btn active" data-size="small">小</button>
+            <button type="button" class="btn btn-secondary btn-sm vnc-size-btn" data-size="medium">中</button>
+            <button type="button" class="btn btn-secondary btn-sm vnc-size-btn" data-size="large">大</button>
+        </div>
+        <button type="button" id="vnc-btn-screen-off" class="btn btn-secondary btn-sm">画面Off</button>
+        <button type="button" id="vnc-btn-fullscreen" class="btn btn-secondary btn-sm">全体</button>
+        <button type="button" id="vnc-btn-refresh" onclick="cleanupRfb();connectVnc();" class="btn btn-danger btn-sm"><i class="fas fa-sync-alt"></i> 再接続</button>
+    </div>
+    <div id="vnc-container" style="width:40%;aspect-ratio:4/3;background:#000;display:flex;align-items:center;justify-content:center;position:relative;transition:all 0.3s">
+    </div>
+</div>
+{% endif %}
+
+<div class="card">
+    <div class="card-header">
+        <h2><i class="fas fa-camera"></i> スナップショット</h2>
+        <button class="btn btn-primary btn-sm" onclick="createSnapshot()"><i class="fas fa-plus"></i> 作成</button>
+    </div>
+    <div id="snapshot-list">
+        <p style="color:var(--text-muted);font-size:11px">読み込み中...</p>
+    </div>
+</div>
+
+<form id="vm-form">
+<div class="card">
+    <h2><i class="fas fa-cog"></i> 基本設定</h2>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;align-items:end">
+        <div class="form-group" style="margin:0">
+            <label>タイプ</label>
+            <select name="domain_type" {% if is_active %}disabled{% endif %}>
+                <option value="kvm" {% if os_info.domain_type == 'kvm' %}selected{% endif %}>KVM</option>
+                <option value="qemu" {% if os_info.domain_type == 'qemu' %}selected{% endif %}>QEMU</option>
+            </select>
+        </div>
+        <div class="form-group" style="margin:0">
+            <label>マシン</label>
+            <select name="machine" {% if is_active %}disabled{% endif %}>
+                {% for m in ['pc-q35-10.2','pc-q35-9.1','pc-q35-9.0','pc-i440fx-9.1','virt'] %}
+                <option value="{{ m }}" {% if os_info.machine == m %}selected{% endif %}>{{ m }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="form-group" style="margin:0">
+            <label>vCPU{% if host_info.max_vcpus %}<span style="color:var(--text-muted)"> / {{ host_info.max_vcpus }}</span>{% endif %}</label>
+            <select name="vcpus" {% if is_active %}disabled{% endif %}>
+                {% for n in [1,2,4,6,8,12,16,24,32,48,64] %}
+                <option value="{{ n }}" {% if vm.vcpus|int == n %}selected{% endif %}>{{ n }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="form-group" style="margin:0">
+            <label>メモリ</label>
+            <select name="memory_mb" {% if is_active %}disabled{% endif %}>
+                {% for mb, label in [(512,'512 MB'),(1024,'1 GB'),(2048,'2 GB'),(3072,'3 GB'),(4096,'4 GB'),(6144,'6 GB'),(8192,'8 GB'),(12288,'12 GB'),(16384,'16 GB'),(24576,'24 GB'),(32768,'32 GB'),(49152,'48 GB'),(65536,'64 GB')] %}
+                <option value="{{ mb }}" {% if vm.memory_mb|int == mb %}selected{% endif %}>{{ label }}</option>
+                {% endfor %}
+            </select>
+        </div>
+    </div>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:8px">
+        <div class="checkbox-group">
+            <input type="checkbox" name="uefi" id="uefi" {% if vm_config.uefi %}checked{% endif %} {% if is_active %}disabled{% endif %}>
+            <label for="uefi">UEFI</label>
+        </div>
+        <div class="checkbox-group">
+            <input type="checkbox" name="tpm_enabled" id="tpm_enabled" {% if vm_config.tpm_enabled %}checked{% endif %} {% if is_active %}disabled{% endif %}>
+            <label for="tpm_enabled">TPM</label>
+        </div>
+        <div class="checkbox-group" id="secureboot-group" style="{% if not vm_config.uefi %}display:none{% endif %}">
+            <input type="checkbox" name="secure_boot" id="secure_boot" {% if vm_config.secure_boot %}checked{% endif %} {% if is_active %}disabled{% endif %}>
+            <label for="secure_boot">Secure Boot</label>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2><i class="fas fa-hdd"></i> ディスク</h2>
+        {% if not is_active %}
+        <button type="button" class="btn btn-primary btn-sm" onclick="addNewDisk()"><i class="fas fa-plus"></i> 追加</button>
+        {% endif %}
+    </div>
+    <p style="color:var(--text-muted);font-size:10px;margin-bottom:8px">{% if is_active %}停止後に変更可能{% else %}↑↓で順序変更{% endif %}</p>
+    {% if devices.disks %}
+    <table>
+        <thead><tr><th style="width:30px"></th><th>デバイス</th><th>タイプ</th><th>ソース</th><th>バス</th><th style="width:100px"></th></tr></thead>
+        <tbody id="disk-list">
+        {% for d in devices.disks %}
+        <tr data-target="{{ d.target_dev }}" data-device="{{ d.device }}">
+            <td style="color:var(--text-muted);font-weight:500">{{ loop.index }}</td>
+            <td style="font-family:monospace">{{ d.target_dev or '-' }}</td>
+            <td><span class="badge badge-success">{{ d.type }}/{{ d.device }}</span></td>
+            <td style="font-size:11px;color:var(--text-secondary);max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ d.source_file or d.source_dev or d.source_name or '-' }}</td>
+            <td>{{ d.target_bus or '-' }}</td>
+            <td style="white-space:nowrap">
+                {% if not is_active %}
+                {% if loop.index > 1 %}<button type="button" class="btn btn-secondary btn-sm btn-icon" onclick="moveDisk(this,-1)" title="上へ"><i class="fas fa-arrow-up"></i></button>{% endif %}
+                {% if not loop.last %}<button type="button" class="btn btn-secondary btn-sm btn-icon" onclick="moveDisk(this,1)" title="下へ"><i class="fas fa-arrow-down"></i></button>{% endif %}
+                {% endif %}
+                {% if d.device == 'cdrom' %}
+                <button type="button" class="btn btn-info btn-sm btn-icon" onclick="changeIso('{{ d.target_dev }}')" title="ISO変更"><i class="fas fa-exchange-alt"></i></button>
+                {% endif %}
+                {% if d.driver_type == 'qcow2' and not is_active %}
+                <button type="button" class="btn btn-warning btn-sm btn-icon" onclick="resizeDisk('{{ d.target_dev }}', '{{ d.source_file }}')" title="拡大"><i class="fas fa-expand-arrows-alt"></i></button>
+                {% endif %}
+                {% if not is_active %}
+                <button type="button" class="btn btn-danger btn-sm btn-icon" onclick="detachDisk('{{ d.target_dev }}', '{{ d.device }}')" title="削除"><i class="fas fa-trash"></i></button>
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p style="color:var(--text-muted);font-size:11px">ディスクがありません</p>
+    {% endif %}
+
+    <div id="new-disks" style="margin-top:8px"></div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2><i class="fas fa-usb"></i> USB パススルー</h2>
+    </div>
+    <div id="usb-attached-list"></div>
+    <div id="usb-host-list" style="margin-top:8px"></div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2><i class="fas fa-tv"></i> グラフィックス</h2>
+    </div>
+    <div style="display:flex;gap:16px;flex-wrap:wrap">
+        <div class="checkbox-group">
+            <input type="checkbox" name="vnc_enabled" id="vnc_enabled" {% if vm_config.vnc_enabled %}checked{% endif %} {% if is_active %}disabled{% endif %}>
+            <label for="vnc_enabled">VNC</label>
+        </div>
+        <div class="checkbox-group">
+            <input type="checkbox" name="spice_enabled" id="spice_enabled" {% if vm_config.spice_enabled %}checked{% endif %} {% if is_active %}disabled{% endif %}>
+            <label for="spice_enabled">SPICE</label>
+        </div>
+        <div class="form-group" style="margin:0;min-width:120px">
+            <select name="video_model" {% if is_active %}disabled{% endif %} style="padding:4px 8px;font-size:11px">
+                <option value="">自動</option>
+                {% for v in [('virtio','VirtIO'),('qxl','QXL'),('cirrus','cirrus')] %}
+                <option value="{{ v[0] }}" {% if vm_config.video_model == v[0] %}selected{% endif %}>{{ v[1] }}</option>
+                {% endfor %}
+            </select>
+        </div>
+    </div>
+    <div id="vnc-options" style="{% if not vm_config.vnc_enabled %}display:none{% endif %};margin-top:8px">
+        <div class="form-row" style="gap:8px">
+            <div class="form-group">
+                <label>ポート</label>
+                <input type="text" name="vnc_port" value="{{ vm_config.vnc_port }}" {% if is_active %}disabled{% endif %}>
+            </div>
+            <div class="form-group">
+                <label>リッスン</label>
+                <input type="text" name="vnc_listen" value="{{ vm_config.vnc_listen }}" {% if is_active %}disabled{% endif %}>
+            </div>
+        </div>
+    </div>
+    <div id="spice-options" style="{% if not vm_config.spice_enabled %}display:none{% endif %};margin-top:8px">
+        <div class="form-row" style="gap:8px">
+            <div class="form-group">
+                <label>ポート</label>
+                <input type="text" name="spice_port" value="{{ vm_config.spice_port }}" {% if is_active %}disabled{% endif %}>
+            </div>
+            <div class="form-group">
+                <label>リッスン</label>
+                <input type="text" name="spice_listen" value="{{ vm_config.spice_listen }}" {% if is_active %}disabled{% endif %}>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2><i class="fas fa-network-wired"></i> ネットワーク</h2>
+    </div>
+    <div class="form-row" style="grid-template-columns:1fr 1fr 1fr">
+        <div class="form-group">
+            <label>タイプ</label>
+            <select name="net_type" {% if is_active %}disabled{% endif %}>
+                {% for n in devices.networks %}
+                <option value="{{ n.type }}" selected>{{ n.type }}</option>
+                {% endfor %}
+                {% if not devices.networks %}
+                <option value="network">Libvirt</option>
+                {% endif %}
+            </select>
+        </div>
+        <div class="form-group">
+            <label>ソース</label>
+            <select name="net_source" {% if is_active %}disabled{% endif %}>
+                {% for n in devices.networks %}
+                <option value="{{ n.source_network }}" selected>{{ n.source_network }}</option>
+                {% endfor %}
+                {% for net in networks %}
+                {% if not devices.networks or devices.networks[0].source_network != net.name %}
+                <option value="{{ net.name }}">{{ net.name }}</option>
+                {% endif %}
+                {% endfor %}
+            </select>
+        </div>
+        <div class="form-group">
+            <label>モデル</label>
+            <select name="net_model" {% if is_active %}disabled{% endif %}>
+                {% for n in devices.networks %}
+                <option value="{{ n.model }}" selected>{{ n.model }}</option>
+                {% endfor %}
+                {% for m in [('virtio','virtio'),('e1000','E1000'),('e1000e','E1000e'),('rtl8139','RTL8139')] %}
+                {% if not devices.networks or devices.networks[0].model != m[0] %}
+                <option value="{{ m[0] }}">{{ m[1] }}</option>
+                {% endif %}
+                {% endfor %}
+            </select>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2><i class="fas fa-volume-up"></i> サウンド / チャンネル / USB</h2>
+    </div>
+    <div style="display:flex;gap:16px;flex-wrap:wrap">
+        <div class="checkbox-group">
+            <input type="checkbox" name="sound_enabled" id="sound_enabled" {% if vm_config.sound_enabled %}checked{% endif %} {% if is_active %}disabled{% endif %}>
+            <label for="sound_enabled">サウンド</label>
+        </div>
+        <div class="checkbox-group">
+            <input type="checkbox" name="channel_spice" id="channel_spice" {% if vm_config.channel_spice %}checked{% endif %} {% if is_active %}disabled{% endif %}>
+            <label for="channel_spice">SPICE Agent</label>
+        </div>
+        <div class="checkbox-group">
+            <input type="checkbox" name="usb_tablet" id="usb_tablet" {% if vm_config.usb_tablet %}checked{% endif %} {% if is_active %}disabled{% endif %}>
+            <label for="usb_tablet">USBタブレット</label>
+        </div>
+        <div class="checkbox-group">
+            <input type="checkbox" name="usb_redirector_1" id="usb_redirector_1" {% if vm_config.usb_redirector_1 %}checked{% endif %} {% if is_active %}disabled{% endif %}>
+            <label for="usb_redirector_1">USB転送 x1</label>
+        </div>
+        <div class="checkbox-group">
+            <input type="checkbox" name="usb_redirector_2" id="usb_redirector_2" {% if vm_config.usb_redirector_2 %}checked{% endif %} {% if is_active %}disabled{% endif %}>
+            <label for="usb_redirector_2">USB転送 x2</label>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2><i class="fas fa-plug"></i> PCI パススルー</h2>
+    </div>
+    {% if devices.hostdevs %}
+    <table>
+        <thead><tr><th>バス</th><th>スロット</th><th>ファンクション</th><th style="width:50px"></th></tr></thead>
+        <tbody>
+        {% for hd in devices.hostdevs %}
+        <tr>
+            <td style="font-family:monospace">{{ hd.bus }}</td>
+            <td style="font-family:monospace">{{ hd.slot }}</td>
+            <td style="font-family:monospace">{{ hd.function }}</td>
+            <td>
+                {% if not is_active %}
+                <button type="button" class="btn btn-danger btn-sm btn-icon" onclick="detachHostdev('{{ hd.bus }}', '{{ hd.slot }}', '{{ hd.function }}')" title="取り外し"><i class="fas fa-trash"></i></button>
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p style="color:var(--text-muted);font-size:11px">接続デバイスなし</p>
+    {% endif %}
+
+    {% if vfio_hostdevs %}
+    <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px">VFIOデバイス</div>
+        {% for hd in vfio_hostdevs %}
+        <div class="checkbox-group">
+            <input type="checkbox" name="vfio_hostdev" value='{{ hd | tojson }}'>
+            <label style="font-size:11px">{{ hd.name }} ({{ hd.vendor_id }}:{{ hd.product_id }})</label>
+        </div>
+        {% endfor %}
+        {% if not is_active %}
+        <button type="button" class="btn btn-primary btn-sm" style="margin-top:6px" onclick="attachHostdev()"><i class="fas fa-plus"></i> 追加</button>
+        {% endif %}
+    </div>
+    {% endif %}
+</div>
+
+{% if not is_active %}
+<div class="form-actions">
+    <button type="button" class="btn btn-secondary" onclick="window.history.back()">キャンセル</button>
+    <button type="submit" class="btn btn-primary"><i class="fas fa-save"></i> 保存</button>
+</div>
+{% endif %}
+</form>
+
+<div class="card" style="margin-top:16px">
+    <div class="card-header">
+        <h2><i class="fas fa-code"></i> XML</h2>
+        {% if not is_active %}
+        <button class="btn btn-primary btn-sm" onclick="saveXml()"><i class="fas fa-save"></i> 保存</button>
+        {% endif %}
+    </div>
+    <textarea id="xml-editor" class="xml-editor" {% if is_active %}readonly{% endif %}>{{ xml }}</textarea>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+let newDiskCount = 0;
+let hasUnsavedChanges = false;
+const saveBtnTop = document.getElementById('save-btn-top');
+
+function markDirty() {
+    if (!hasUnsavedChanges) {
+        hasUnsavedChanges = true;
+        if (saveBtnTop) {
+            saveBtnTop.classList.add('btn-pulse');
+        }
+    }
+}
+
+function markClean() {
+    hasUnsavedChanges = false;
+    if (saveBtnTop) {
+        saveBtnTop.classList.remove('btn-pulse');
+    }
+}
+
+document.getElementById('vm-form').addEventListener('input', function(e) {
+    if (e.target.matches('input, select, textarea')) {
+        markDirty();
+    }
+});
+
+document.getElementById('vm-form').addEventListener('change', function(e) {
+    if (e.target.matches('input[type="checkbox"], input[type="radio"]')) {
+        markDirty();
+    }
+});
+
+document.getElementById('spice_enabled').addEventListener('change', function() {
+    document.getElementById('spice-options').style.display = this.checked ? 'block' : 'none';
+});
+
+document.getElementById('vnc_enabled').addEventListener('change', function() {
+    document.getElementById('vnc-options').style.display = this.checked ? 'block' : 'none';
+});
+
+function addNewDisk() {
+    newDiskCount++;
+    const idx = newDiskCount;
+
+    const usedTargets = new Set();
+    document.querySelectorAll('#disk-list tr').forEach(tr => {
+        const t = tr.dataset.target;
+        if (t) usedTargets.add(t);
+    });
+    document.querySelectorAll('[name^="new_target_"]').forEach(sel => {
+        if (sel.value) usedTargets.add(sel.value);
+    });
+
+    const virtioTargets = ['vda','vdb','vdc','vdd','vde','vdf','vdg','vdh'];
+    const sataTargets = ['sda','sdb','sdc','sdd','sde'];
+    let nextTarget = 'vdb';
+    const nextVirtio = virtioTargets.find(t => !usedTargets.has(t));
+    const nextSata = sataTargets.find(t => !usedTargets.has(t));
+    if (nextVirtio && nextVirtio !== 'vda') nextTarget = nextVirtio;
+    else if (nextSata) nextTarget = nextSata;
+
+    const allTargets = [...virtioTargets.slice(1), ...sataTargets];
+
+    const html = `
+    <div class="disk-item" id="new-disk-${idx}">
+        <button type="button" class="remove-btn" onclick="this.parentElement.remove()"><i class="fas fa-times"></i></button>
+        <div class="form-row-3">
+            <div class="form-group">
+                <label>タイプ</label>
+                <select name="new_type_${idx}" onchange="updateDiskSourceWidget(this, ${idx})">
+                    <option value="file">ファイル (既存)</option>
+                    <option value="file_create">ファイル (空のディスク作成)</option>
+                    <option value="block">ブロックデバイス</option>
+                    <option value="block_lun">ブロックデバイス (LUN)</option>
+                    <option value="cdrom">CD-ROM (ISO)</option>
+                </select>
+            </div>
+            <div class="form-group" id="new-source-${idx}">
+                <label>ソースパス</label>
+                <input type="text" name="new_source_${idx}" placeholder="/dev/sdb または /path/to/disk.qcow2">
+            </div>
+            <div class="form-group">
+                <label>ターゲット</label>
+                <select name="new_target_${idx}">
+                    ${allTargets.map(t => `<option value="${t}"${t===nextTarget?' selected':''}>${t}</option>`).join('')}
+                </select>
+            </div>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label>バス</label>
+                <select name="new_bus_${idx}">
+                    <option value="virtio">virtio</option>
+                    <option value="sata">SATA</option>
+                    <option value="scsi">SCSI</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>ドライバー</label>
+                <select name="new_driver_${idx}">
+                    <option value="qcow2">qcow2</option>
+                    <option value="raw">raw</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>&nbsp;</label>
+                <button type="button" class="btn btn-primary btn-sm" onclick="confirmAddDisk(${idx})"><i class="fas fa-plus"></i> 追加</button>
+            </div>
+        </div>
+    </div>`;
+    document.getElementById('new-disks').insertAdjacentHTML('beforeend', html);
+    updateDiskSourceWidget(document.querySelector(`[name="new_type_${idx}"]`), idx);
+}
+
+function confirmAddDisk(idx) {
+    const dtype = document.querySelector(`[name="new_type_${idx}"]`).value;
+    const srcEl = document.querySelector(`[name="new_source_${idx}"]`);
+    const src = srcEl ? srcEl.value.trim() : '';
+    const targetDev = document.querySelector(`[name="new_target_${idx}"]`).value;
+    const targetBus = document.querySelector(`[name="new_bus_${idx}"]`).value;
+    const driverType = document.querySelector(`[name="new_driver_${idx}"]`).value;
+
+    if (dtype === 'file_create') {
+        const diskSizeEl = document.querySelector(`[name="new_disk_size_${idx}"]`);
+        const diskSize = diskSizeEl ? diskSizeEl.value.trim() : '';
+        if (!src) { alert('ファイル名を入力してください'); return; }
+        if (!diskSize) { alert('容量を入力してください'); return; }
+        if (!confirm(`空ディスク '${src}' (${diskSize}) を作成して追加しますか？`)) return;
+        document.getElementById(`new-disk-${idx}`).remove();
+        fetch(`/api/vm/{{ vm.name }}/action`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({action: 'disk_create_and_attach', disk_path: src, disk_size: diskSize, disk_format: driverType, target_dev: targetDev, target_bus: targetBus})
+        })
+        .then(r => r.json())
+        .then(d => { if (d.error) alert('エラー: ' + d.error); else { alert('ディスクを追加しました'); location.reload(); }})
+        .catch(err => alert('通信エラー: ' + err));
+        return;
+    }
+
+    if (dtype !== 'cdrom' && !src) { alert('ソースを選択してください'); return; }
+
+    let diskXml;
+    if (dtype === 'block') {
+        diskXml = `<disk type='block' device='disk'><driver name='qemu' type='${driverType}'/><source dev='${src}'/><target dev='${targetDev}' bus='${targetBus}'/></disk>`;
+    } else if (dtype === 'block_lun') {
+        diskXml = `<disk type='block' device='lun'><driver name='qemu' type='${driverType}'/><source dev='${src}'/><target dev='${targetDev}' bus='scsi'/></disk>`;
+    } else if (dtype === 'cdrom') {
+        diskXml = `<disk type='file' device='cdrom'><driver name='qemu' type='raw'/>`;
+        if (src) diskXml += `<source file='${src}'/>`;
+        diskXml += `<target dev='${targetDev}' bus='sata'/><readonly/></disk>`;
+    } else {
+        diskXml = `<disk type='file' device='disk'><driver name='qemu' type='${driverType}'/><source file='${src}'/><target dev='${targetDev}' bus='${targetBus}'/></disk>`;
+    }
+
+    if (!confirm(`ディスク '${targetDev}' を追加しますか？`)) return;
+    document.getElementById(`new-disk-${idx}`).remove();
+
+    fetch(`/api/vm/{{ vm.name }}/action`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({action: 'disk_attach', xml: diskXml})
+    })
+    .then(r => r.json())
+    .then(d => { if (d.error) alert('エラー: ' + d.error); else { alert('ディスクを追加しました'); location.reload(); }})
+    .catch(err => alert('通信エラー: ' + err));
+}
+
+function updateDiskSourceWidget(sel, idx) {
+    const item = sel.closest('.disk-item');
+    const target = item.querySelector(`[name="new_target_${idx}"]`);
+    const bus = item.querySelector(`[name="new_bus_${idx}"]`);
+    const driver = item.querySelector(`[name="new_driver_${idx}"]`);
+    const container = document.getElementById(`new-source-${idx}`);
+    if (!container) return;
+
+    if (sel.value === 'file_create') {
+        target.value = 'vdb';
+        bus.value = 'virtio';
+        driver.value = 'qcow2';
+        container.innerHTML = '<label>ファイル名</label><div style="display:flex;gap:4px"><input type="text" name="new_source_' + idx + '" style="flex:2" placeholder="例: newdisk.qcow2"><input type="text" name="new_disk_size_' + idx + '" style="flex:1" placeholder="容量 (例: 50G)"></div><div style="font-size:0.8em;color:var(--text-secondary);margin-top:4px">ストレージプールのパスに作成されます</div>';
+    } else if (sel.value === 'block') {
+        target.value = 'vdb';
+        bus.value = 'virtio';
+        driver.value = 'raw';
+        container.innerHTML = '<label>ブロックデバイス</label><select name="new_source_' + idx + '" style="width:100%"><option value="">読み込み中...</option></select>';
+        fetch('/api/block-devices').then(r => r.json()).then(devs => {
+            const s = container.querySelector('select');
+            s.innerHTML = '<option value="">-- デバイスを選択 --</option>';
+            devs.forEach(d => {
+                const opt = document.createElement('option');
+                opt.value = d.path;
+                opt.textContent = d.label;
+                s.appendChild(opt);
+            });
+        });
+    } else if (sel.value === 'block_lun') {
+        target.value = 'sdb';
+        bus.value = 'scsi';
+        driver.value = 'raw';
+        container.innerHTML = '<label>ブロックデバイス (LUN)</label><select name="new_source_' + idx + '" style="width:100%"><option value="">読み込み中...</option></select>';
+        fetch('/api/block-devices').then(r => r.json()).then(devs => {
+            const s = container.querySelector('select');
+            s.innerHTML = '<option value="">-- デバイスを選択 --</option>';
+            devs.forEach(d => {
+                const opt = document.createElement('option');
+                opt.value = d.path;
+                opt.textContent = d.label;
+                s.appendChild(opt);
+            });
+        });
+    } else if (sel.value === 'cdrom') {
+        target.value = 'sdc';
+        bus.value = 'sata';
+        driver.value = 'raw';
+        container.innerHTML = '<label>ISOファイル</label><select name="new_source_' + idx + '" style="width:100%"><option value="">読み込み中...</option></select>';
+        fetch('/api/iso-files').then(r => r.json()).then(isos => {
+            const s = container.querySelector('select');
+            s.innerHTML = '<option value="">-- ISOを選択 --</option>';
+            isos.forEach(iso => {
+                const opt = document.createElement('option');
+                opt.value = iso.path;
+                opt.textContent = iso.label;
+                s.appendChild(opt);
+            });
+        });
+    } else {
+        target.value = 'vdb';
+        bus.value = 'virtio';
+        driver.value = 'qcow2';
+        container.innerHTML = '<label>ストレージプール ボリューム</label><select name="new_source_' + idx + '" style="width:100%"><option value="">読み込み中...</option></select>';
+        fetch('/api/storage-pool-volumes').then(r => r.json()).then(vols => {
+            const s = container.querySelector('select');
+            s.innerHTML = '<option value="">-- ボリュームを選択 --</option>';
+            vols.filter(v => v.name.endsWith('.qcow2')).forEach(v => {
+                const opt = document.createElement('option');
+                opt.value = v.path;
+                opt.textContent = v.label;
+                s.appendChild(opt);
+            });
+            if (!s.options.length || s.options.length === 1) {
+                s.innerHTML = '<option value="">qcow2ボリュームがありません</option>';
+            }
+        });
+    }
+}
+
+async function collectFormData() {
+    const fd = new FormData(document.getElementById('vm-form'));
+
+    const bootOrder = [];
+    document.querySelectorAll('#disk-list tr').forEach(tr => {
+        const dev = tr.dataset.device;
+        if (dev === 'disk') bootOrder.push('hd');
+        else if (dev === 'cdrom') bootOrder.push('cdrom');
+    });
+
+    let currentUsbs = [];
+    let newUsbs = [];
+    try {
+        const xmlResp = await fetch(`/api/vm/{{ vm.name }}/xml`);
+        const xmlData = await xmlResp.json();
+        const doc = new DOMParser().parseFromString(xmlData.xml, 'text/xml');
+        doc.querySelectorAll('hostdev[type="usb"]').forEach(hd => {
+            const v = hd.querySelector('vendor')?.getAttribute('id') || '';
+            const p = hd.querySelector('product')?.getAttribute('id') || '';
+            if (v && p) currentUsbs.push({vendor_id: v, product_id: p});
+        });
+    } catch(e) {}
+
+    return {
+        domain_type: fd.get('domain_type'),
+        arch: '{{ os_info.arch }}',
+        machine: fd.get('machine'),
+        vcpus: fd.get('vcpus'),
+        memory_mb: fd.get('memory_mb'),
+        uefi: fd.has('uefi'),
+        tpm_enabled: fd.has('tpm_enabled'),
+        secure_boot: fd.has('secure_boot'),
+        sound_enabled: fd.has('sound_enabled'),
+        channel_spice: fd.has('channel_spice'),
+        usb_tablet: fd.has('usb_tablet'),
+        usb_redirector_1: fd.has('usb_redirector_1'),
+        usb_redirector_2: fd.has('usb_redirector_2'),
+        vnc_enabled: fd.has('vnc_enabled'),
+        vnc_port: fd.get('vnc_port'),
+        vnc_listen: fd.get('vnc_listen'),
+        spice_enabled: fd.has('spice_enabled'),
+        spice_port: fd.get('spice_port'),
+        spice_tls_port: fd.get('spice_tls_port'),
+        spice_listen: fd.get('spice_listen'),
+        video_model: fd.get('video_model'),
+        net_type: fd.get('net_type'),
+        net_source: fd.get('net_source'),
+        net_model: fd.get('net_model'),
+        boot_order: bootOrder,
+        disk_order: [...document.querySelectorAll('#disk-list tr')].map(tr => ({target: tr.dataset.target, device: tr.dataset.device})),
+        existing_disks: [
+            {% for d in devices.disks %}
+            {type:'{{ d.type }}',device:'{{ d.device }}',target_dev:'{{ d.target_dev }}',target_bus:'{{ d.target_bus }}',source_file:'{{ d.source_file }}',source_dev:'{{ d.source_dev }}',source_name:'{{ d.source_name }}',source_protocol:'{{ d.source_protocol }}',driver_type:'{{ d.driver_type }}',readonly:{{ 'true' if d.device == 'cdrom' else 'false' }}},
+            {% endfor %}
+        ],
+        existing_usbs: currentUsbs,
+        iso_paths: [],
+        hostdevs: [],
+        usb_hostdevs: newUsbs
+    };
+}
+
+document.getElementById('vm-form').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    const data = await collectFormData();
+    for (let i = 1; i <= 50; i++) {
+        const src = document.querySelector(`[name="iso_path_${i}"]`);
+        if (src && src.value.trim()) data.iso_paths.push(src.value.trim());
+    }
+    if (!confirm('設定を保存しますか？')) return;
+    fetch('/vm/{{ vm.name }}/edit', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(data)
+    })
+    .then(r => r.json())
+    .then(r => { if (r.error) alert('エラー: ' + r.error); else { markClean(); alert('保存しました'); location.reload(); }})
+    .catch(err => alert('通信エラー: ' + err));
+});
+
+function vmAction(action) {
+    if (action === 'undefine') {
+        if (!confirm('このVMを削除しますか？')) return;
+        const deleteDisk = confirm('ディスクファイルも削除しますか？');
+        fetch(`/api/vm/{{ vm.name }}/action`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({action: action, delete_disk: deleteDisk})
+        })
+        .then(r => r.json())
+        .then(d => { if (d.error) alert('エラー: ' + d.error); else window.location.href = '/'; })
+        .catch(err => alert('通信エラー: ' + err));
+        return;
+    }
+    const msgs = {stop:'シャットダウンしますか？',destroy:'強制停止しますか？',reboot:'再起動しますか？',suspend:'一時停止しますか？'};
+    if (msgs[action] && !confirm(msgs[action])) return;
+    fetch(`/api/vm/{{ vm.name }}/action`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({action: action})
+    })
+    .then(r => r.json())
+    .then(d => { if (d.error) alert('エラー: ' + d.error); else location.reload(); })
+    .catch(err => alert('通信エラー: ' + err));
+}
+
+function saveXml() {
+    const xml = document.getElementById('xml-editor').value;
+    if (!confirm('XML設定を保存しますか？')) return;
+    fetch(`/api/vm/{{ vm.name }}/xml`, {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({xml: xml})
+    })
+    .then(r => r.json())
+    .then(d => { if (d.error) alert('エラー: ' + d.error); else alert('保存しました'); })
+    .catch(err => alert('通信エラー: ' + err));
+}
+
+function moveDisk(btn, dir) {
+    const tr = btn.closest('tr');
+    const tbody = document.getElementById('disk-list');
+    const rows = [...tbody.querySelectorAll('tr')];
+    const idx = rows.indexOf(tr);
+    const ni = idx + dir;
+    if (ni < 0 || ni >= rows.length) return;
+    if (dir === -1) tbody.insertBefore(tr, rows[ni]);
+    else tbody.insertBefore(rows[ni], tr);
+    updateDiskNumbers();
+    markDirty();
+}
+
+function updateDiskNumbers() {
+    document.querySelectorAll('#disk-list tr').forEach((tr, i) => {
+        const num = tr.querySelector('td:first-child');
+        if (num) num.textContent = (i+1) + '.';
+        const btns = tr.querySelectorAll('td:last-child button');
+        btns.forEach(b => b.remove());
+        const td = tr.querySelector('td:last-child');
+        if (!td) return;
+        const target = tr.dataset.target;
+        const device = tr.dataset.device;
+        const isActive = {{ 'true' if is_active else 'false' }};
+        if (!isActive) {
+            if (i > 0) td.innerHTML += `<button type="button" class="btn btn-secondary btn-sm" onclick="moveDisk(this,-1)" title="上へ"><i class="fas fa-arrow-up"></i></button>`;
+            if (i < document.querySelectorAll('#disk-list tr').length - 1) td.innerHTML += `<button type="button" class="btn btn-secondary btn-sm" onclick="moveDisk(this,1)" title="下へ"><i class="fas fa-arrow-down"></i></button>`;
+        }
+        if (device === 'cdrom') td.innerHTML += `<button type="button" class="btn btn-info btn-sm" onclick="changeIso('${target}')" title="ISO変更"><i class="fas fa-exchange-alt"></i></button>`;
+        if (!isActive) td.innerHTML += `<button type="button" class="btn btn-danger btn-sm" onclick="detachDisk('${target}', '${device}')" title="削除"><i class="fas fa-trash"></i></button>`;
+    });
+}
+
+function detachDisk(targetDev, deviceType) {
+    const label = deviceType === 'cdrom' ? 'CD-ROM' : 'ディスク';
+    if (!confirm(`${label} '${targetDev}' を削除しますか？`)) return;
+    fetch(`/api/vm/{{ vm.name }}/action`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({action: 'disk_detach', target_dev: targetDev})
+    })
+    .then(r => r.json())
+    .then(d => { if (d.error) alert('エラー: ' + d.error); else { alert('削除しました'); location.reload(); }})
+    .catch(err => alert('通信エラー: ' + err));
+}
+
+function detachHostdev(bus, slot, func) {
+    if (!confirm(`PCIデバイス ${bus}:${slot}.${func} を取り外しますか？`)) return;
+    fetch(`/api/vm/{{ vm.name }}/action`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({action: 'hostdev_detach', bus: bus, slot: slot, function: func})
+    })
+    .then(r => r.json())
+    .then(d => { if (d.error) alert('エラー: ' + d.error); else { alert('取り外しました'); location.reload(); }})
+    .catch(err => alert('通信エラー: ' + err));
+}
+
+function attachHostdev() {
+    const checked = document.querySelectorAll('[name="vfio_hostdev"]:checked');
+    if (!checked.length) { alert('デバイスを選択してください'); return; }
+    if (!confirm(`${checked.length}個のPCIデバイスを追加しますか？`)) return;
+
+    const promises = Array.from(checked).map(cb => {
+        const hd = JSON.parse(cb.value);
+        return fetch(`/api/vm/{{ vm.name }}/action`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({action: 'hostdev_attach', bus: hd.bus, slot: hd.slot, function: hd.function})
+        }).then(r => r.json());
+    });
+
+    Promise.all(promises).then(results => {
+        const errors = results.filter(r => r.error);
+        if (errors.length) {
+            alert('一部エラー: ' + errors.map(e => e.error).join('; '));
+        } else {
+            alert('デバイスを追加しました');
+        }
+        location.reload();
+    }).catch(err => alert('通信エラー: ' + err));
+}
+
+function changeIso(targetDev) {
+    let existing = document.getElementById('iso-change-modal');
+    if (existing) existing.remove();
+
+    const modal = document.createElement('div');
+    modal.id = 'iso-change-modal';
+    modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:1000';
+    modal.innerHTML = `
+    <div style="background:var(--bg-card);border-radius:8px;padding:20px;min-width:400px;max-width:90vw">
+        <h3 style="margin-top:0">CD-ROM '${targetDev}' のISO変更</h3>
+        <div class="form-group">
+            <label>プールから選択</label>
+            <select id="iso-change-select" style="width:100%">
+                <option value="">-- 選択してください --</option>
+                <option value="__eject__">ISOなし（取り出し）</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>または手動入力</label>
+            <input type="text" id="iso-change-input" placeholder="/path/to/file.iso" style="width:100%">
+        </div>
+        <div style="text-align:right;margin-top:15px">
+            <button type="button" class="btn btn-secondary" onclick="document.getElementById('iso-change-modal').remove()" style="margin-right:8px">キャンセル</button>
+            <button type="button" class="btn btn-primary" onclick="confirmIsoChange('${targetDev}')">変更</button>
+        </div>
+    </div>`;
+    document.body.appendChild(modal);
+
+    fetch('/api/iso-files').then(r => r.json()).then(isos => {
+        const sel = document.getElementById('iso-change-select');
+        isos.sort((a, b) => a.name.localeCompare(b.name));
+        isos.forEach(iso => {
+            const opt = document.createElement('option');
+            opt.value = iso.path;
+            opt.textContent = iso.label;
+            sel.appendChild(opt);
+        });
+    });
+
+    document.getElementById('iso-change-select').addEventListener('change', function() {
+        if (this.value === '__eject__') {
+            document.getElementById('iso-change-input').value = '';
+        } else {
+            document.getElementById('iso-change-input').value = this.value;
+        }
+    });
+}
+
+function confirmIsoChange(targetDev) {
+    const input = document.getElementById('iso-change-input');
+    const sel = document.getElementById('iso-change-select');
+    let newSource = (input && input.value.trim()) || (sel && sel.value);
+    if (newSource === '__eject__') newSource = '';
+    if (!newSource && sel && sel.value !== '__eject__' && !input.value.trim()) { alert('ISOファイルを選択または入力してください'); return; }
+    const label = newSource ? 'ISOを変更' : 'ISOを取り出し';
+    if (!confirm(`CD-ROM '${targetDev}' を${label}しますか？`)) return;
+    document.getElementById('iso-change-modal').remove();
+    fetch(`/api/vm/{{ vm.name }}/action`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({action: 'disk_update_source', target_dev: targetDev, new_source: newSource})
+    })
+    .then(r => r.json())
+    .then(d => { if (d.error) alert('エラー: ' + d.error); else { alert(`${label}しました`); location.reload(); }})
+    .catch(err => alert('通信エラー: ' + err));
+}
+
+function resizeDisk(targetDev, sourcePath) {
+    let existing = document.getElementById('disk-resize-modal');
+    if (existing) existing.remove();
+
+    const fileName = sourcePath ? sourcePath.split('/').pop() : targetDev;
+    const modal = document.createElement('div');
+    modal.id = 'disk-resize-modal';
+    modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:1000';
+    modal.innerHTML = `
+    <div style="background:var(--bg-card);border-radius:8px;padding:20px;min-width:380px;max-width:90vw">
+        <h3 style="margin-top:0">ディスク拡大</h3>
+        <p style="color:var(--text-secondary);font-size:0.9em;margin-bottom:15px">
+            対象: <strong>${fileName}</strong><br>
+            パス: <span style="font-size:0.85em">${sourcePath || '-'}</span>
+        </p>
+        <div class="form-group">
+            <label>新しいサイズ</label>
+            <input type="text" id="disk-resize-input" placeholder="例: 100G, 200G" style="width:100%">
+            <small style="color:var(--text-secondary)">例: 100G (+100GiB), 500M (+500MiB)</small>
+        </div>
+        <div style="text-align:right;margin-top:15px">
+            <button type="button" class="btn btn-secondary" onclick="document.getElementById('disk-resize-modal').remove()" style="margin-right:8px">キャンセル</button>
+            <button type="button" class="btn btn-warning" onclick="confirmDiskResize('${targetDev}')">拡大</button>
+        </div>
+    </div>`;
+    document.body.appendChild(modal);
+}
+
+function confirmDiskResize(targetDev) {
+    const input = document.getElementById('disk-resize-input');
+    const newSize = input ? input.value.trim() : '';
+    if (!newSize) { alert('拡大するサイズを入力してください'); return; }
+    if (!confirm(`ディスク '${targetDev}' を ${newSize} に拡大しますか？`)) return;
+    document.getElementById('disk-resize-modal').remove();
+    fetch(`/api/vm/{{ vm.name }}/action`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({action: 'disk_resize', target_dev: targetDev, new_size: newSize})
+    })
+    .then(r => r.json())
+    .then(d => {
+        if (d.error) {
+            alert('エラー: ' + d.error);
+        } else {
+            const oldGB = d.old_size ? (d.old_size / 1073741824).toFixed(1) : '?';
+            const newGB = d.new_size ? (d.new_size / 1073741824).toFixed(1) : '?';
+            alert(`拡大しました！\\n${oldGB} GB → ${newGB} GB\\n\\nゲストOS内でもパーティションを拡張してください。`);
+            location.reload();
+        }
+    })
+    .catch(err => alert('通信エラー: ' + err));
+}
+
+function usbAttach(vid, pid, label) {
+    if (!confirm(`${label} をVMに接続しますか？`)) return;
+    fetch(`/api/vm/{{ vm.name }}/action`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({action:'usb_attach', vendor_id:vid, product_id:pid})
+    })
+    .then(r => r.json())
+    .then(d => { if (d.error) alert('エラー: ' + d.error); else { alert('接続しました'); loadUsbDevices(); }})
+    .catch(err => alert('通信エラー: ' + err));
+}
+
+function usbDetach(vid, pid, label) {
+    if (!confirm(`${label} をVMから取り外しますか？`)) return;
+    fetch(`/api/vm/{{ vm.name }}/action`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({action:'usb_detach', vendor_id:vid, product_id:pid})
+    })
+    .then(r => r.json())
+    .then(d => { if (d.error) alert('エラー: ' + d.error); else { alert('取り外しました'); loadUsbDevices(); }})
+    .catch(err => alert('通信エラー: ' + err));
+}
+
+function loadUsbDevices() {
+    const isActive = {{ 'true' if is_active else 'false' }};
+    Promise.all([
+        fetch(`/api/vm/{{ vm.name }}/xml`).then(r=>r.json()),
+        fetch('/api/usb-devices').then(r=>r.json())
+    ]).then(([xmlData, hostDevs]) => {
+        const doc = new DOMParser().parseFromString(xmlData.xml, 'text/xml');
+        const usbs = doc.querySelectorAll('hostdev[type="usb"]');
+        const nameMap = {};
+        hostDevs.forEach(d => { nameMap[d.vendor_id.toLowerCase() + ':' + d.product_id.toLowerCase()] = d.name; });
+
+        let html = '';
+        if (usbs.length) {
+            html = '<table><thead><tr><th>デバイス</th><th></th></tr></thead><tbody>';
+            usbs.forEach(hd => {
+                const v = hd.querySelector('vendor')?.getAttribute('id') || '';
+                const p = hd.querySelector('product')?.getAttribute('id') || '';
+                const key = v.replace('0x','').toLowerCase() + ':' + p.replace('0x','').toLowerCase();
+                const devName = nameMap[key] || '不明';
+                html += `<tr><td>${v}:${p} <span style="color:var(--text-secondary)">(${devName})</span></td>`;
+                html += `<td><button type="button" class="btn btn-danger btn-sm" onclick="usbDetach('${v.replace('0x','')}','${p.replace('0x','')}','${v}:${p}')"><i class="fas fa-times"></i> 取り外し</button></td>`;
+                html += '</tr>';
+            });
+            html += '</tbody></table>';
+        } else {
+            html = '<p style="color:var(--text-secondary)">接続中のUSBデバイスはありません</p>';
+        }
+        document.getElementById('usb-attached-list').innerHTML = html;
+    });
+    fetch('/api/usb-devices').then(r=>r.json()).then(devs => {
+        let html = '';
+        devs.forEach(d => {
+            html += `<div style="display:flex;align-items:center;gap:10px;margin:4px 0"><span style="font-size:0.9em">${d.label}</span>`;
+            const safeLabel = d.label.replace(/'/g, "\\'");
+            html += `<button type="button" class="btn btn-success btn-sm" onclick="usbAttach('${d.vendor_id}','${d.product_id}','${safeLabel}')"><i class="fas fa-plug"></i> 接続</button>`;
+            html += '</div>';
+        });
+        document.getElementById('usb-host-list').innerHTML = html || '<p style="color:var(--text-secondary)">USBデバイスなし</p>';
+    });
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    loadUsbDevices();
+    loadSnapshots();
+});
+
+function loadSnapshots() {
+    fetch(`/api/vm/{{ vm.name }}/snapshots`).then(r => r.json()).then(snaps => {
+        const el = document.getElementById('snapshot-list');
+        if (!snaps.length) {
+            el.innerHTML = '<p style="color:var(--text-secondary)">スナップショットはありません</p>';
+            return;
+        }
+        let html = '<table><thead><tr><th>名前</th><th>状態</th><th>作成日時</th><th>説明</th><th></th></tr></thead><tbody>';
+        snaps.forEach(s => {
+            const date = s.creation ? new Date(s.creation * 1000).toLocaleString('ja-JP') : '-';
+            const stateLabel = s.state === 'running' ? '稼働中' : s.state === 'shutoff' ? '停止中' : s.state;
+            html += `<tr>`;
+            html += `<td><strong>${s.name}</strong></td>`;
+            html += `<td><span class="status-badge status-${s.state === 'running' ? 'running' : 'stopped'}">${stateLabel}</span></td>`;
+            html += `<td style="font-size:0.85em">${date}</td>`;
+            html += `<td style="font-size:0.85em;color:var(--text-secondary)">${s.description || '-'}</td>`;
+            html += `<td style="white-space:nowrap">`;
+            html += `<button class="btn btn-info btn-sm" onclick="revertSnapshot('${s.name}')" title="元に戻す"><i class="fas fa-undo"></i></button> `;
+            html += `<button class="btn btn-danger btn-sm" onclick="deleteSnapshot('${s.name}')" title="削除"><i class="fas fa-trash"></i></button>`;
+            html += `</td></tr>`;
+        });
+        html += '</tbody></table>';
+        el.innerHTML = html;
+    }).catch(() => {
+        document.getElementById('snapshot-list').innerHTML = '<p style="color:var(--text-secondary)">取得できません</p>';
+    });
+}
+
+function createSnapshot() {
+    let existing = document.getElementById('snapshot-create-modal');
+    if (existing) existing.remove();
+
+    const modal = document.createElement('div');
+    modal.id = 'snapshot-create-modal';
+    modal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:1000';
+    modal.innerHTML = `
+    <div style="background:var(--bg-card);border-radius:8px;padding:20px;min-width:380px;max-width:90vw">
+        <h3 style="margin-top:0">スナップショット作成</h3>
+        <div class="form-group">
+            <label>名前</label>
+            <input type="text" id="snap-name" placeholder="空なら自動生成" style="width:100%">
+        </div>
+        <div class="form-group">
+            <label>説明</label>
+            <input type="text" id="snap-desc" placeholder="オプション" style="width:100%">
+        </div>
+        <div style="text-align:right;margin-top:15px">
+            <button type="button" class="btn btn-secondary" onclick="document.getElementById('snapshot-create-modal').remove()" style="margin-right:8px">キャンセル</button>
+            <button type="button" class="btn btn-primary" onclick="confirmCreateSnapshot()">作成</button>
+        </div>
+    </div>`;
+    document.body.appendChild(modal);
+}
+
+function confirmCreateSnapshot() {
+    const name = document.getElementById('snap-name').value.trim();
+    const desc = document.getElementById('snap-desc').value.trim();
+    if (!confirm('スナップショットを作成しますか？')) return;
+    document.getElementById('snapshot-create-modal').remove();
+    fetch(`/api/vm/{{ vm.name }}/snapshot-create`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name: name, description: desc})
+    })
+    .then(r => r.json())
+    .then(d => { if (d.error) alert('エラー: ' + d.error); else { alert('作成しました'); loadSnapshots(); }})
+    .catch(err => alert('通信エラー: ' + err));
+}
+
+function revertSnapshot(snapName) {
+    if (!confirm(`スナップショット「${snapName}」に元に戻しますか？\n現在の状態は失われます。`)) return;
+    fetch(`/api/vm/{{ vm.name }}/snapshot-revert`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name: snapName})
+    })
+    .then(r => r.json())
+    .then(d => { if (d.error) alert('エラー: ' + d.error); else { alert('元に戻しました'); location.reload(); }})
+    .catch(err => alert('通信エラー: ' + err));
+}
+
+function deleteSnapshot(snapName) {
+    if (!confirm(`スナップショット「${snapName}」を削除しますか？`)) return;
+    fetch(`/api/vm/{{ vm.name }}/snapshot-delete`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name: snapName})
+    })
+    .then(r => r.json())
+    .then(d => { if (d.error) alert('エラー: ' + d.error); else { alert('削除しました'); loadSnapshots(); }})
+    .catch(err => alert('通信エラー: ' + err));
+}
+</script>
+
+{% if is_active %}
+<script type="module">
+import RFB from '/novnc/core/rfb.js';
+
+const vmName = "{{ vm.name }}";
+let rfb = null;
+let wsPort = null;
+let reconnectTimer = null;
+let reconnectDelay = 1000;
+
+const vncStatus = document.getElementById('vnc-status');
+const vncContainer = document.getElementById('vnc-container');
+const btnFS = document.getElementById('vnc-btn-fullscreen');
+
+function setVncStatus(text, color) {
+    if (vncStatus) {
+        vncStatus.textContent = text;
+        vncStatus.style.background = color;
+    }
+}
+
+function cleanupRfb() {
+    if (rfb) {
+        rfb.removeEventListener('connected', onConnected);
+        rfb.removeEventListener('disconnected', onDisconnected);
+        rfb.removeEventListener('failed', onFailed);
+        rfb.disconnect();
+        rfb = null;
+    }
+}
+
+function onConnected() {
+    setVncStatus('接続済み', '#27ae60');
+    reconnectDelay = 1000;
+}
+
+function onDisconnected() {
+    setVncStatus('切断 - 再接続中...', '#f39c12');
+    scheduleReconnect();
+}
+
+function onFailed() {
+    setVncStatus('接続失敗 - 再試行中...', '#e74c3c');
+    scheduleReconnect();
+}
+
+function scheduleReconnect() {
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(() => {
+        reconnectDelay = Math.min(reconnectDelay * 1.5, 10000);
+        connectVnc();
+    }, reconnectDelay);
+}
+
+async function connectVnc() {
+    try {
+        cleanupRfb();
+        setVncStatus('プロキシ起動中...', '#f39c12');
+        const resp = await fetch(`/api/vm/${vmName}/console-proxy`, { method: 'POST' });
+        const data = await resp.json();
+        if (data.error) {
+            setVncStatus('エラー: ' + data.error, '#e74c3c');
+            scheduleReconnect();
+            return;
+        }
+        wsPort = data.ws_port;
+
+        setVncStatus('接続中...', '#f39c12');
+        const wsUrl = `ws://${location.hostname}:${wsPort}`;
+
+        rfb = new RFB(vncContainer, wsUrl, {
+            credentials: {},
+            wsProtocols: ['binary'],
+        });
+
+        rfb.addEventListener('connected', onConnected);
+        rfb.addEventListener('disconnected', onDisconnected);
+        rfb.addEventListener('failed', onFailed);
+        rfb.scaleViewport = true;
+        rfb.resizeSession = true;
+    } catch (e) {
+        setVncStatus('エラー: ' + e.message, '#e74c3c');
+        scheduleReconnect();
+    }
+}
+
+btnFS.addEventListener('click', () => {
+    if (!vncContainer) return;
+    if (vncContainer.requestFullscreen) vncContainer.requestFullscreen();
+    else if (vncContainer.webkitRequestFullscreen) vncContainer.webkitRequestFullscreen();
+});
+
+let vncScreenOffOverlay = null;
+const btnScreenOff = document.getElementById('vnc-btn-screen-off');
+if (btnScreenOff) {
+    btnScreenOff.addEventListener('click', () => {
+        if (vncScreenOffOverlay) {
+            vncScreenOffOverlay.remove();
+            vncScreenOffOverlay = null;
+            btnScreenOff.textContent = '画面Off';
+        } else {
+            vncScreenOffOverlay = document.createElement('div');
+            vncScreenOffOverlay.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;background:#000;z-index:5;cursor:pointer';
+            vncScreenOffOverlay.title = 'クリックで画面を戻す';
+            vncScreenOffOverlay.addEventListener('click', () => {
+                vncScreenOffOverlay.remove();
+                vncScreenOffOverlay = null;
+                btnScreenOff.textContent = '画面Off';
+            });
+            vncContainer.appendChild(vncScreenOffOverlay);
+            btnScreenOff.textContent = '画面On';
+        }
+    });
+}
+
+document.querySelectorAll('.vnc-size-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        const size = btn.dataset.size;
+        const sizes = {small: '40%', medium: '60%', large: '80%'};
+        vncContainer.style.width = sizes[size] || '80%';
+        vncContainer.style.aspectRatio = '4/3';
+        document.querySelectorAll('.vnc-size-btn').forEach(b => {
+            b.style.background = 'none';
+            b.style.borderColor = '#555';
+            b.style.color = '#ccc';
+        });
+        btn.style.background = '#2980b9';
+        btn.style.borderColor = '#2980b9';
+        btn.style.color = '#fff';
+    });
+});
+
+window.addEventListener('beforeunload', () => {
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    cleanupRfb();
+});
+
+connectVnc();
+
+window.cleanupRfb = cleanupRfb;
+window.connectVnc = connectVnc;
+
+setTimeout(() => { cleanupRfb(); connectVnc(); }, 500);
+
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+        setTimeout(() => { cleanupRfb(); connectVnc(); }, 200);
+    }
+});
+
+const statusPoll = setInterval(async () => {
+    try {
+        const resp = await fetch(`/api/vm/${vmName}/status`);
+        const data = await resp.json();
+        if (!data.active) {
+            clearInterval(statusPoll);
+            location.reload();
+        }
+    } catch(e) {}
+}, 3000);
+</script>
+{% endif %}
+{% endblock %}

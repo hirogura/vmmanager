@@ -1,0 +1,504 @@
+{% extends "base.html" %}
+{% block title %}{{ vm.name }} 編集 - VM Manager{% endblock %}
+{% block content %}
+<div class="detail-header">
+    <h1><i class="fas fa-edit"></i> {{ vm.name }}</h1>
+    <span class="spacer"></span>
+    <a href="/vm/{{ vm.name }}" class="btn btn-secondary btn-sm"><i class="fas fa-arrow-left"></i> 戻る</a>
+</div>
+{% if is_active %}
+<div class="alert alert-error">VMが実行中です。編集するには先に停止してください。</div>
+{% endif %}
+
+<form id="edit-form">
+
+<div class="card">
+    <h2><i class="fas fa-cog"></i> 基本設定</h2>
+    <div class="form-row">
+        <div class="form-group">
+            <label>仮想化タイプ</label>
+            <select name="domain_type" {% if is_active %}disabled{% endif %}>
+                <option value="kvm" {% if vm_config.domain_type == 'kvm' %}selected{% endif %}>KVM</option>
+                <option value="qemu" {% if vm_config.domain_type == 'qemu' %}selected{% endif %}>QEMU</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>マシンタイプ</label>
+            <select name="machine" {% if is_active %}disabled{% endif %}>
+                <option value="pc-q35-10.2" {% if vm_config.machine == 'pc-q35-10.2' %}selected{% endif %}>pc-q35-10.2</option>
+                <option value="pc-q35-9.1" {% if vm_config.machine == 'pc-q35-9.1' %}selected{% endif %}>pc-q35-9.1</option>
+                <option value="pc-q35-9.0" {% if vm_config.machine == 'pc-q35-9.0' %}selected{% endif %}>pc-q35-9.0</option>
+                <option value="pc-i440fx-9.1" {% if vm_config.machine == 'pc-i440fx-9.1' %}selected{% endif %}>pc-i440fx-9.1</option>
+            </select>
+        </div>
+    </div>
+    <div class="form-row">
+        <div class="form-group">
+            <label>vCPU数</label>
+            <select name="vcpus" {% if is_active %}disabled{% endif %}>
+                {% for n in [1,2,4,6,8,12,16,24,32,48,64] %}
+                <option value="{{ n }}" {% if vm_config.vcpus|int == n %}selected{% endif %}>{{ n }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="form-group">
+            <label>メモリ (MB)</label>
+            <select name="memory_mb" {% if is_active %}disabled{% endif %}>
+                {% for mb, label in [(512,'512 MB'),(1024,'1 GB'),(2048,'2 GB'),(3072,'3 GB'),(4096,'4 GB'),(6144,'6 GB'),(8192,'8 GB'),(12288,'12 GB'),(16384,'16 GB'),(24576,'24 GB'),(32768,'32 GB'),(49152,'48 GB'),(65536,'64 GB')] %}
+                <option value="{{ mb }}" {% if vm_config.memory_mb|int == mb %}selected{% endif %}>{{ label }}</option>
+                {% endfor %}
+            </select>
+        </div>
+    </div>
+    <div style="display:flex;gap:16px;flex-wrap:wrap">
+        <div class="checkbox-group">
+            <input type="checkbox" name="uefi" id="uefi" {% if vm_config.uefi %}checked{% endif %} {% if is_active %}disabled{% endif %}>
+            <label for="uefi">UEFI</label>
+        </div>
+        <div class="checkbox-group">
+            <input type="checkbox" name="tpm_enabled" id="tpm_enabled" {% if vm_config.tpm_enabled %}checked{% endif %} {% if is_active %}disabled{% endif %}>
+            <label for="tpm_enabled">TPM</label>
+        </div>
+        <div class="checkbox-group" id="secureboot-group" style="{% if not vm_config.uefi %}display:none{% endif %}">
+            <input type="checkbox" name="secure_boot" id="secure_boot" {% if vm_config.secure_boot %}checked{% endif %} {% if is_active %}disabled{% endif %}>
+            <label for="secure_boot">Secure Boot</label>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2><i class="fas fa-hdd"></i> ディスク</h2>
+    </div>
+
+    <h3>現在のディスク</h3>
+    <table>
+        <thead><tr><th>デバイス</th><th>タイプ</th><th>ソース</th><th>バス</th></tr></thead>
+        <tbody id="existing-disks">
+        {% for d in devices.disks %}
+        <tr>
+            <td>{{ d.target_dev }}</td>
+            <td><span class="status-badge status-running">{{ d.type }}/{{ d.device }}</span></td>
+            <td>{{ d.source_file or d.source_dev or d.source_name or '-' }}</td>
+            <td>{{ d.target_bus }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+
+    <h3 style="margin-top:15px">ディスク追加</h3>
+    <div id="new-disks"></div>
+    <button type="button" class="btn btn-primary btn-sm" onclick="addNewDisk()" style="margin-top:5px"><i class="fas fa-plus"></i> ディスク追加</button>
+
+    <h3 style="margin-top:15px"><i class="fas fa-compact-disc"></i> ISO / CD-ROM</h3>
+    <div id="iso-disks"></div>
+    <div style="display:flex;gap:8px;align-items:end;margin-top:8px">
+        <div class="form-group" style="flex:1;margin:0">
+            <label>プールから選択</label>
+            <select id="iso-pool-select">
+                <option value="">-- 選択してください --</option>
+            </select>
+        </div>
+        <button type="button" class="btn btn-primary btn-sm" onclick="addIsoFromPool()" style="margin-bottom:2px"><i class="fas fa-plus"></i> 追加</button>
+    </div>
+    <button type="button" class="btn btn-secondary btn-sm" onclick="addIsoDisk()" style="margin-top:8px"><i class="fas fa-keyboard"></i> 手動入力</button>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2><i class="fas fa-tv"></i> グラフィックス</h2>
+    </div>
+    <p style="color:var(--text-secondary);margin-bottom:12px;font-size:0.9em">VNCとSPICEを<strong>両方</strong>有効にできます</p>
+
+    <h3>VNC</h3>
+    <div class="form-row">
+        <div class="form-group">
+            <label>ポート</label>
+            <input type="text" name="vnc_port" value="{{ vm_config.vnc_port }}">
+        </div>
+        <div class="form-group">
+            <label>リッスンアドレス</label>
+            <input type="text" name="vnc_listen" value="{{ vm_config.vnc_listen }}">
+        </div>
+    </div>
+
+    <h3 style="margin-top:15px">SPICE</h3>
+    <div class="checkbox-group">
+        <input type="checkbox" name="spice_enabled" id="spice_enabled" {% if vm_config.spice_enabled %}checked{% endif %}>
+        <label for="spice_enabled">SPICEを有効にする</label>
+    </div>
+    <div id="spice-options" style="{% if not vm_config.spice_enabled %}display:none{% endif %}">
+        <div class="form-row">
+            <div class="form-group">
+                <label>ポート</label>
+                <input type="text" name="spice_port" value="{{ vm_config.spice_port }}">
+            </div>
+            <div class="form-group">
+                <label>TLSポート</label>
+                <input type="text" name="spice_tls_port" value="">
+            </div>
+        </div>
+        <div class="form-group">
+            <label>リッスンアドレス</label>
+            <input type="text" name="spice_listen" value="{{ vm_config.spice_listen }}">
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <h2><i class="fas fa-tv"></i> ビデオ</h2>
+    <div class="form-row">
+        <div class="form-group">
+            <label>ビデオモデル</label>
+            <select name="video_model">
+                <option value="">自動</option>
+                <option value="virtio" {% if vm_config.video_model == 'virtio' %}selected{% endif %}>VirtIO GPU</option>
+                <option value="qxl" {% if vm_config.video_model == 'qxl' %}selected{% endif %}>QXL</option>
+                <option value="cirrus" {% if vm_config.video_model == 'cirrus' %}selected{% endif %}>cirrus</option>
+                <option value="none" {% if vm_config.video_model == 'none' %}selected{% endif %}>デバイスなし</option>
+            </select>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2><i class="fas fa-network-wired"></i> ネットワーク</h2>
+    </div>
+    <div class="form-row">
+        <div class="form-group">
+            <label>ネットワークタイプ</label>
+            <select name="net_type" {% if is_active %}disabled{% endif %}>
+                {% for n in devices.networks %}
+                <option value="{{ n.type }}" selected>{{ n.type }}</option>
+                {% endfor %}
+                {% if not devices.networks %}
+                <option value="network">Libvirt仮想ネットワーク</option>
+                {% endif %}
+            </select>
+        </div>
+        <div class="form-group">
+            <label>ネットワークソース</label>
+            <select name="net_source" {% if is_active %}disabled{% endif %}>
+                {% for n in devices.networks %}
+                <option value="{{ n.source_network }}" selected>{{ n.source_network }}</option>
+                {% endfor %}
+                {% for net in networks %}
+                <option value="{{ net.name }}">{{ net.name }}</option>
+                {% endfor %}
+            </select>
+        </div>
+    </div>
+    <div class="form-group">
+        <label>ネットワークモデル</label>
+        <select name="net_model" {% if is_active %}disabled{% endif %}>
+            {% for n in devices.networks %}
+            <option value="{{ n.model }}" selected>{{ n.model }}</option>
+            {% endfor %}
+            {% if not devices.networks %}
+            <option value="virtio">virtio</option>
+            {% endif %}
+        </select>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2><i class="fas fa-usb"></i> USBデバイスパースルー</h2>
+    </div>
+
+    {% if devices.hostdevs or devices.usb_hostdevs is defined and devices.usb_hostdevs %}
+    <h3>現在接続中のホストデバイス</h3>
+    <table>
+        <thead><tr><th>タイプ</th><th>詳細</th></tr></thead>
+        <tbody>
+        {% for h in devices.hostdevs %}
+        <tr><td>PCI</td><td>{{ h.domain }}:{{ h.bus }}:{{ h.slot }}.{{ h.function }}</td></tr>
+        {% endfor %}
+        {% for u in devices.usb_hostdevs %}
+        <tr><td>USB</td><td>{{ u.vendor_id }}:{{ u.product_id }}</td></tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+
+    <h3 style="margin-top:15px">USBデバイス追加</h3>
+    <p style="color:var(--text-secondary);font-size:0.85em;margin-bottom:10px">ホストに接続されているUSBデバイスを選択してパースルーします</p>
+    <div id="usb-devices-list">
+        {% for usb in usb_devices %}
+        <div class="checkbox-group">
+            <input type="checkbox" name="usb_device" value='{{ {"vendor_id": usb.vendor_id, "product_id": usb.product_id} | tojson }}'>
+            <label>{{ usb.label }}</label>
+        </div>
+        {% endfor %}
+        {% if not usb_devices %}
+        <p style="color:var(--text-secondary)">USBデバイスが検出されませんでした</p>
+        {% endif %}
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2><i class="fas fa-volume-up"></i> サウンド / チャンネル / USBリダイレクター</h2>
+    </div>
+    <div class="checkbox-group">
+        <input type="checkbox" name="sound_enabled" id="sound_enabled" {% if vm_config.sound_enabled %}checked{% endif %} {% if is_active %}disabled{% endif %}>
+        <label for="sound_enabled">サウンドデバイス (ich9)</label>
+        <small style="margin-left:5px;color:var(--text-secondary)">SPICEオーディオに使用</small>
+    </div>
+    <div class="checkbox-group">
+        <input type="checkbox" name="channel_spice" id="channel_spice" {% if vm_config.channel_spice %}checked{% endif %} {% if is_active %}disabled{% endif %}>
+        <label for="channel_spice">SPICE Agent チャンネル</label>
+        <small style="margin-left:5px;color:var(--text-secondary)">クリップボード共有・モニタ自動調整に必要</small>
+    </div>
+    <div class="checkbox-group">
+        <input type="checkbox" name="usb_redirector_1" id="usb_redirector_1" {% if vm_config.usb_redirector_1 %}checked{% endif %} {% if is_active %}disabled{% endif %}>
+        <label for="usb_redirector_1">USB リダイレクター 1</label>
+        <small style="margin-left:5px;color:var(--text-secondary)">SPICE経由でホストUSBを転送</small>
+    </div>
+    <div class="checkbox-group">
+        <input type="checkbox" name="usb_redirector_2" id="usb_redirector_2" {% if vm_config.usb_redirector_2 %}checked{% endif %} {% if is_active %}disabled{% endif %}>
+        <label for="usb_redirector_2">USB リダイレクター 2</label>
+        <small style="margin-left:5px;color:var(--text-secondary)">2台目のUSB転送用</small>
+    </div>
+</div>
+
+<div class="form-actions">
+    <button type="button" class="btn btn-secondary" onclick="window.history.back()">キャンセル</button>
+    <button type="submit" class="btn btn-primary" {% if is_active %}disabled{% endif %}>
+        <i class="fas fa-save"></i> 保存
+    </button>
+</div>
+
+</form>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let newDiskCount = 0;
+let isoDiskCount = 0;
+
+document.getElementById('spice_enabled').addEventListener('change', function() {
+    document.getElementById('spice-options').style.display = this.checked ? 'block' : 'none';
+});
+
+function addNewDisk() {
+    newDiskCount++;
+    const html = `
+    <div class="disk-item" id="new-disk-${newDiskCount}">
+        <button type="button" class="remove-btn" onclick="this.parentElement.remove()"><i class="fas fa-times"></i></button>
+        <div class="form-row-3">
+            <div class="form-group">
+                <label>タイプ</label>
+                <select name="new_type_${newDiskCount}" onchange="updateDiskDefaults(this, ${newDiskCount})">
+                    <option value="file">ファイル (qcow2/raw)</option>
+                    <option value="block">ブロックデバイス</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>ソースパス</label>
+                <input type="text" name="new_source_${newDiskCount}" placeholder="/dev/sdb">
+            </div>
+            <div class="form-group">
+                <label>ターゲット</label>
+                <input type="text" name="new_target_${newDiskCount}" value="vdb">
+            </div>
+        </div>
+        <div class="form-row">
+            <div class="form-group">
+                <label>バス</label>
+                <select name="new_bus_${newDiskCount}">
+                    <option value="virtio">virtio</option>
+                    <option value="sata">SATA</option>
+                    <option value="scsi">SCSI</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>ドライバー</label>
+                <select name="new_driver_${newDiskCount}">
+                    <option value="qcow2">qcow2</option>
+                    <option value="raw">raw</option>
+                </select>
+            </div>
+        </div>
+    </div>`;
+    document.getElementById('new-disks').insertAdjacentHTML('beforeend', html);
+}
+
+function updateDiskDefaults(sel, idx) {
+    const item = sel.closest('.disk-item');
+    const target = item.querySelector(`[name="new_target_${idx}"]`);
+    const bus = item.querySelector(`[name="new_bus_${idx}"]`);
+    const driver = item.querySelector(`[name="new_driver_${idx}"]`);
+    if (sel.value === 'block') {
+        target.value = 'vdb';
+        bus.value = 'virtio';
+        driver.value = 'raw';
+    } else {
+        target.value = 'vdb';
+        bus.value = 'virtio';
+        driver.value = 'qcow2';
+    }
+}
+
+function addIsoDisk() {
+    isoDiskCount++;
+    const html = `
+    <div class="disk-item" id="iso-disk-${isoDiskCount}">
+        <button type="button" class="remove-btn" onclick="this.parentElement.remove()"><i class="fas fa-times"></i></button>
+        <div class="form-row">
+            <div class="form-group">
+                <label>ISOファイルパス</label>
+                <input type="text" name="iso_path_${isoDiskCount}" placeholder="/var/lib/libvirt/images/win11.iso">
+            </div>
+        </div>
+    </div>`;
+    document.getElementById('iso-disks').insertAdjacentHTML('beforeend', html);
+}
+
+function addIsoFromPool() {
+    const sel = document.getElementById('iso-pool-select');
+    if (!sel || !sel.value) { alert('ISOファイルを選択してください'); return; }
+    isoDiskCount++;
+    const html = `
+    <div class="disk-item" id="iso-disk-${isoDiskCount}">
+        <button type="button" class="remove-btn" onclick="this.parentElement.remove()"><i class="fas fa-times"></i></button>
+        <div class="form-row">
+            <div class="form-group">
+                <label>ISOファイルパス</label>
+                <input type="text" name="iso_path_${isoDiskCount}" value="${sel.value}" readonly>
+            </div>
+        </div>
+    </div>`;
+    document.getElementById('iso-disks').insertAdjacentHTML('beforeend', html);
+    sel.value = '';
+}
+
+function loadIsoFiles() {
+    const sel = document.getElementById('iso-pool-select');
+    if (!sel) return;
+    fetch('/api/iso-files').then(r=>r.json()).then(isos => {
+        isos.sort((a,b) => a.name.localeCompare(b.name));
+        isos.forEach(iso => {
+            const opt = document.createElement('option');
+            opt.value = iso.path;
+            opt.textContent = iso.label;
+            sel.appendChild(opt);
+        });
+    });
+}
+
+function collectFormData() {
+    const fd = new FormData(document.getElementById('edit-form'));
+    const data = {
+        domain_type: fd.get('domain_type'),
+        arch: '{{ vm_config.arch }}',
+        machine: fd.get('machine'),
+        vcpus: fd.get('vcpus'),
+        memory_mb: fd.get('memory_mb'),
+        uefi: fd.has('uefi'),
+        vnc_port: fd.get('vnc_port'),
+        vnc_listen: fd.get('vnc_listen'),
+        spice_enabled: fd.has('spice_enabled'),
+        spice_port: fd.get('spice_port'),
+        spice_tls_port: fd.get('spice_tls_port'),
+        spice_listen: fd.get('spice_listen'),
+        video_model: fd.get('video_model'),
+        tpm_enabled: fd.has('tpm_enabled'),
+        secure_boot: fd.has('secure_boot'),
+        sound_enabled: fd.has('sound_enabled'),
+        channel_spice: fd.has('channel_spice'),
+        usb_redirector_1: fd.has('usb_redirector_1'),
+        usb_redirector_2: fd.has('usb_redirector_2'),
+        net_type: fd.get('net_type'),
+        net_source: fd.get('net_source'),
+        net_model: fd.get('net_model'),
+        existing_disks: [
+            {% for d in devices.disks %}
+            {
+                type: '{{ d.type }}',
+                device: '{{ d.device }}',
+                target_dev: '{{ d.target_dev }}',
+                target_bus: '{{ d.target_bus }}',
+                source_file: '{{ d.source_file }}',
+                source_dev: '{{ d.source_dev }}',
+                source_name: '{{ d.source_name }}',
+                source_protocol: '{{ d.source_protocol }}',
+                driver_type: '{{ d.driver_type }}',
+                readonly: {{ 'true' if d.device == 'cdrom' else 'false' }}
+            },
+            {% endfor %}
+        ],
+        existing_usbs: [
+            {% for u in devices.usb_hostdevs %}
+            {
+                vendor_id: '{{ u.vendor_id }}',
+                product_id: '{{ u.product_id }}'
+            },
+            {% endfor %}
+        ],
+        disks: [],
+        iso_paths: [],
+        hostdevs: [],
+        usb_hostdevs: []
+    };
+
+    for (let i = 1; i <= 50; i++) {
+        const src = fd.get('new_source_' + i);
+        if (src) {
+            const dtype = fd.get('new_type_' + i);
+            data.disks.push({
+                type: dtype,
+                source_file: dtype === 'file' ? src : '',
+                source_dev: dtype === 'block' ? src : '',
+                target_dev: fd.get('new_target_' + i),
+                target_bus: fd.get('new_bus_' + i),
+                driver_type: fd.get('new_driver_' + i)
+            });
+        }
+    }
+
+    for (let i = 1; i <= 50; i++) {
+        const src = fd.get('iso_path_' + i);
+        if (src && src.trim()) {
+            data.iso_paths.push(src.trim());
+        }
+    }
+
+    document.querySelectorAll('[name="usb_device"]:checked').forEach(cb => {
+        try {
+            data.usb_hostdevs.push(JSON.parse(cb.value));
+        } catch(e) {}
+    });
+
+    return data;
+}
+
+document.getElementById('edit-form').addEventListener('submit', function(e) {
+    e.preventDefault();
+    const data = collectFormData();
+
+    if (!confirm('設定を保存しますか？\n（VMの定義が更新されます）')) return;
+
+    fetch('/vm/{{ vm.name }}/edit', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(data)
+    })
+    .then(r => r.json())
+    .then(result => {
+        if (result.error) {
+            alert('エラー: ' + result.error);
+        } else {
+            alert('設定を保存しました');
+            window.location.href = '/vm/{{ vm.name }}';
+        }
+    })
+    .catch(err => alert('通信エラー: ' + err));
+});
+
+document.addEventListener('DOMContentLoaded', function() {
+    loadIsoFiles();
+});
+</script>
+{% endblock %}

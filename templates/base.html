@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <title>{% block title %}VM Manager{% endblock %}</title>
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=23">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+</head>
+<body>
+    <nav class="sidebar">
+        <div class="sidebar-header">
+            <i class="fas fa-server"></i>
+            <span>VM Manager</span>
+        </div>
+        <ul class="sidebar-menu">
+            <li><a href="/vm/create" class="{% if request.endpoint == 'vm_create' %}active{% endif %}"><i class="fas fa-plus-circle"></i> 新規作成</a></li>
+        </ul>
+        <div class="sidebar-section">仮想マシン</div>
+        <div class="sidebar-vm-list">
+            {% for vm in sidebar_vms %}
+            <a href="/vm/{{ vm.name }}" class="sidebar-vm-item {% if request.path == '/vm/' + vm.name %}active{% endif %}">
+                <span class="vm-dot {{ vm.state }}"></span>
+                <span class="sidebar-vm-name">{{ vm.name }}</span>
+            </a>
+            {% endfor %}
+            {% if not sidebar_vms %}
+            <div style="font-size:11px;color:var(--text-muted);padding:4px 8px">VMなし</div>
+            {% endif %}
+        </div>
+    </nav>
+    <main class="content">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="alert alert-{{ category }}">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+        {% block content %}{% endblock %}
+    </main>
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

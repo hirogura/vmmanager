@@ -1,0 +1,242 @@
+{% extends "base.html" %}
+{% block title %}新規作成 - VM Manager{% endblock %}
+{% block content %}
+<div class="detail-header">
+    <h1><i class="fas fa-plus-circle"></i> 新規作成</h1>
+    <span class="spacer"></span>
+    <a href="/" class="btn btn-secondary btn-sm"><i class="fas fa-arrow-left"></i> 戻る</a>
+</div>
+<p style="color:var(--text-muted);font-size:11px;margin-bottom:12px">基本設定で作成。詳細は編集画面で変更可能。</p>
+
+<form id="vm-form">
+
+<div class="card">
+    <h2><i class="fas fa-cog"></i> 基本設定</h2>
+    <div class="form-group">
+        <label>VM名 *</label>
+        <input type="text" name="name" required placeholder="例: win11, ubuntu2604">
+    </div>
+    <div class="form-row">
+        <div class="form-group">
+            <label>仮想化タイプ</label>
+            <select name="domain_type">
+                <option value="kvm">KVM（推奨）</option>
+                <option value="qemu">QEMU（エミュレーション）</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>アーキテクチャ</label>
+            <select name="arch">
+                <option value="x86_64">x86_64</option>
+                <option value="aarch64">aarch64</option>
+            </select>
+        </div>
+    </div>
+    <div class="form-row">
+        <div class="form-group">
+            <label>マシンタイプ</label>
+            <select name="machine">
+                <option value="pc-q35-10.2" selected>pc-q35-10.2 (Q35)</option>
+                <option value="pc-q35-9.1">pc-q35-9.1</option>
+                <option value="pc-q35-9.0">pc-q35-9.0</option>
+                <option value="pc-i440fx-9.1">pc-i440fx-9.1</option>
+                <option value="virt">virt (ARM)</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>vCPU数</label>
+            <select name="vcpus">
+                {% for n in [1,2,4,6,8,12,16,24,32,48,64] %}
+                <option value="{{ n }}" {% if n == 2 %}selected{% endif %}>{{ n }}</option>
+                {% endfor %}
+            </select>
+        </div>
+    </div>
+    <div class="form-group">
+        <label>メモリ (MB)</label>
+        <select name="memory_mb">
+            {% for mb, label in [(512,'512 MB'),(1024,'1 GB'),(2048,'2 GB'),(3072,'3 GB'),(4096,'4 GB'),(6144,'6 GB'),(8192,'8 GB'),(12288,'12 GB'),(16384,'16 GB'),(24576,'24 GB'),(32768,'32 GB'),(49152,'48 GB'),(65536,'64 GB')] %}
+            <option value="{{ mb }}" {% if mb == 4096 %}selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div style="display:flex;gap:16px;flex-wrap:wrap">
+        <div class="checkbox-group">
+            <input type="checkbox" name="uefi" id="uefi" checked onchange="document.getElementById('secureboot-group').style.display=this.checked?'flex':'none'">
+            <label for="uefi">UEFI</label>
+        </div>
+        <div class="checkbox-group">
+            <input type="checkbox" name="tpm_enabled" id="tpm_enabled">
+            <label for="tpm_enabled">TPM</label>
+        </div>
+        <div class="checkbox-group" id="secureboot-group" style="display:flex">
+            <input type="checkbox" name="secure_boot" id="secure_boot">
+            <label for="secure_boot">Secure Boot</label>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2><i class="fas fa-hdd"></i> ディスク</h2>
+    </div>
+    <div class="form-row">
+        <div class="form-group">
+            <label>プライマリディスク</label>
+            <select name="disk_size_gb" onchange="onPrimaryDiskChange()">
+                <option value="existing">既存ディスクを使用</option>
+                {% for gb in [10,20,30,40,50,60,80,100,120,150,200,256,300,400,500,750,1024] %}
+                <option value="{{ gb }}" {% if gb == 50 %}selected{% endif %}>{{ gb }} GB 新規作成</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="form-group">
+            <label>ストレージプール</label>
+            <select name="disk_pool">
+                {% for pool in storage_pools %}
+                <option value="{{ pool.name }}" {% if pool.name == 'default' %}selected{% endif %}>{{ pool.name }}{% if pool.active %} ✓{% endif %}</option>
+                {% endfor %}
+            </select>
+        </div>
+    </div>
+    <div id="existing-disk-row" style="display:none">
+        <div class="form-row">
+            <div class="form-group">
+                <label>既存ディスクを選択</label>
+                <select id="existing-disk-select" onchange="document.getElementById('existing-disk-path').value=this.value">
+                    <option value="">-- 選択 --</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>パス（手動入力）</label>
+                <input type="text" id="existing-disk-path" name="existing_disk_path" placeholder="/path/to/disk.qcow2">
+            </div>
+        </div>
+    </div>
+    <div class="form-group">
+        <label>ディスクバス</label>
+        <select name="disk_bus">
+            <option value="virtio">virtio (推奨)</option>
+            <option value="sata">SATA</option>
+            <option value="scsi">SCSI</option>
+        </select>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2><i class="fas fa-code"></i> もしくはXMLを貼り付けて作成</h2>
+    </div>
+    <p style="color:var(--text-muted);margin-bottom:8px;font-size:11px">libvirt XMLを貼り付けて作成</p>
+    <textarea id="xml-paste" rows="12" style="width:100%;background:var(--bg-main);color:var(--text-primary);padding:10px;border-radius:4px;font-family:monospace;font-size:11px;resize:vertical;border:1px solid var(--border)" placeholder="<domain type='kvm'>...</domain>"></textarea>
+    <div style="margin-top:8px">
+        <button type="button" class="btn btn-primary btn-sm" onclick="submitXmlCreate()"><i class="fas fa-save"></i> XMLで作成</button>
+    </div>
+</div>
+
+<div class="form-actions">
+    <button type="submit" class="btn btn-primary"><i class="fas fa-save"></i> 作成</button>
+</div>
+
+</form>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function onPrimaryDiskChange() {
+    const sel = document.getElementById('existing-disk-row');
+    const sizeSelect = document.querySelector('[name="disk_size_gb"]');
+    sel.style.display = sizeSelect.value === 'existing' ? '' : 'none';
+}
+
+function loadExistingDisks() {
+    const sel = document.getElementById('existing-disk-select');
+    if (!sel) return;
+    fetch('/api/storage-pool-volumes').then(r => r.json()).then(vols => {
+        vols.filter(v => v.name.endsWith('.qcow2')).forEach(v => {
+            const opt = document.createElement('option');
+            opt.value = v.path;
+            opt.textContent = v.label;
+            sel.appendChild(opt);
+        });
+    });
+}
+
+function collectFormData() {
+    const f = document.getElementById('vm-form');
+    return {
+        name: f.elements['name'].value.trim(),
+        domain_type: f.elements['domain_type'].value,
+        arch: f.elements['arch'].value,
+        machine: f.elements['machine'].value,
+        vcpus: f.elements['vcpus'].value,
+        memory_mb: f.elements['memory_mb'].value,
+        uefi: f.elements['uefi'].checked,
+        secure_boot: f.elements['secure_boot'].checked,
+        disk_size_gb: f.elements['disk_size_gb'].value,
+        disk_pool: f.elements['disk_pool'].value,
+        disk_bus: f.elements['disk_bus'].value,
+        existing_disk_path: f.elements['existing_disk_path'] ? f.elements['existing_disk_path'].value : '',
+        tpm_enabled: f.elements['tpm_enabled'].checked
+    };
+}
+
+function submitXmlCreate() {
+    const xml = document.getElementById('xml-paste').value.trim();
+    if (!xml) {
+        alert('XMLを貼り付けてください');
+        return;
+    }
+    if (!confirm('貼り付けたXMLでVMを作成しますか？')) return;
+
+    fetch('/vm/create-xml', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({xml: xml})
+    })
+    .then(r => r.json())
+    .then(result => {
+        if (result.error) {
+            alert('エラー: ' + result.error);
+        } else {
+            alert('VM「' + result.name + '」を作成しました');
+            window.location.href = '/vm/' + result.name;
+        }
+    })
+    .catch(err => alert('通信エラー: ' + err));
+}
+
+document.getElementById('vm-form').addEventListener('submit', function(e) {
+    e.preventDefault();
+    const data = collectFormData();
+    if (!data.name) {
+        alert('VM名を入力してください');
+        return;
+    }
+
+    if (!confirm(`VM「${data.name}」を作成しますか？`)) return;
+
+    fetch('/vm/create', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(data)
+    })
+    .then(r => r.json())
+    .then(result => {
+        if (result.error) {
+            alert('エラー: ' + result.error);
+        } else {
+            const vmName = result.name || data.name;
+            alert('VM「' + vmName + '」を作成しました');
+            window.location.href = '/vm/' + vmName;
+        }
+    })
+    .catch(err => alert('通信エラー: ' + err));
+});
+
+document.addEventListener('DOMContentLoaded', function() {
+    loadExistingDisks();
+    onPrimaryDiskChange();
+});
+</script>
+{% endblock %}

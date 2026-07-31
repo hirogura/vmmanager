@@ -36,7 +36,8 @@ apt-get install -y -qq \
     python3-websockify \
     usbutils \
     sudo \
-    curl
+    curl \
+    git
 
 echo "[2/8] libvirtd サービスを有効化中..."
 systemctl enable --now libvirtd.service

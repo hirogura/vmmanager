@@ -48,6 +48,10 @@ if ! command -v tailscale >/dev/null 2>&1; then
 fi
 
 echo "[4/8] アプリケーションを GitHub から取得中..."
+if ! command -v git >/dev/null 2>&1; then
+    echo "  git が未インストールのためインストールします..."
+    apt-get install -y -qq git
+fi
 if [ -d "${INSTALL_DIR}/.git" ]; then
     echo "既存のリポジトリを更新します: ${INSTALL_DIR}"
     git -C "${INSTALL_DIR}" remote set-url origin "${GIT_REPO}"

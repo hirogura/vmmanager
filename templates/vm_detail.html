@@ -1148,7 +1148,7 @@ async function connectVnc() {
         wsPort = data.ws_port;
 
         setVncStatus('接続中...', '#f39c12');
-        const wsUrl = `ws://${location.hostname}:${wsPort}`;
+        const wsUrl = data.ws_url || `wss://${location.host}/websockify?token=${vmName}`;
 
         rfb = new RFB(vncContainer, wsUrl, {
             credentials: {},

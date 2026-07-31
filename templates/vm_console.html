@@ -63,6 +63,8 @@ let rfb = null;
 let screenOffOverlay = null;
 let reconnectTimer = null;
 let wsPort = null;
+let failCount = 0;
+const MAX_FAIL_RETRIES = 3;
 
 function setStatus(text, cls) {
     statusEl.textContent = text;
@@ -77,6 +79,7 @@ function setButtons(connected) {
 
 async function connect() {
     try {
+        failCount = 0;
         setStatus('プロキシ起動中...', 'connecting');
         const resp = await fetch(`/api/vm/${vmName}/console-proxy`, { method: 'POST' });
         const data = await resp.json();
@@ -84,7 +87,7 @@ async function connect() {
 
         wsPort = data.ws_port;
         setStatus('接続中...', 'connecting');
-        const wsUrl = data.ws_url || `wss://${location.host}/websockify`;
+        const wsUrl = data.ws_url || `wss://${location.host}/websockify?token=${vmName}`;
 
         rfb = new RFB(container, wsUrl, {
             credentials: {},
@@ -113,9 +116,15 @@ async function connect() {
                 setButtons(false);
             }
         });
-        rfb.addEventListener('failed', (e) => {
-            setStatus('接続失敗', 'error');
-            setButtons(false);
+        rfb.addEventListener('failed', () => {
+            if (failCount < MAX_FAIL_RETRIES) {
+                failCount++;
+                setStatus(`接続失敗 - 再試行中 (${failCount}/${MAX_FAIL_RETRIES})...`, 'connecting');
+                setTimeout(() => { cleanup(); connect(); }, 1200);
+            } else {
+                setStatus('接続失敗', 'error');
+                setButtons(false);
+            }
         });
     } catch (e) {
         setStatus('エラー: ' + e.message, 'error');

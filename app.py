@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import libvirt
 import os
+import socket
+import time
 from xml.etree import ElementTree as ET
 from flask import Flask, render_template, request, jsonify, redirect, url_for, flash
 
@@ -1818,17 +1820,106 @@ def api_networks():
 _websockify_procs = {}
 
 WEBSOCKIFY_PORT = 6080
-
-
-def _ws_url():
-    return f"wss://{request.host}/websockify"
-
+WEBSOCKIFY_TARGETS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "websockify-targets.cfg")
 
 import subprocess as _sp
-try:
-    _sp.run(["pkill", "-9", "-f", "websockify"], capture_output=True, timeout=5)
-except Exception:
-    pass
+
+
+def _ws_url(vm_name=None):
+    url = f"wss://{request.host}/websockify"
+    if vm_name:
+        url += f"?token={vm_name}"
+    return url
+
+
+def _vm_vnc_port(dom):
+    try:
+        root = ET.fromstring(dom.XMLDesc(0))
+    except Exception:
+        return None
+    for graphics in root.findall(".//graphics"):
+        if graphics.get("type") == "vnc":
+            port = graphics.get("port", "")
+            if port and port.isdigit():
+                return port
+            return None
+    return None
+
+
+def _write_targets(conn):
+    lines = []
+    for dom in conn.listAllDomains(libvirt.VIR_CONNECT_LIST_DOMAINS_ACTIVE):
+        port = _vm_vnc_port(dom)
+        if port:
+            lines.append(f"{dom.name()}: 127.0.0.1:{port}")
+    tmp = WEBSOCKIFY_TARGETS + ".tmp"
+    with open(tmp, "w") as f:
+        f.write("\n".join(lines) + ("\n" if lines else ""))
+    os.replace(tmp, WEBSOCKIFY_TARGETS)
+
+
+def _ensure_websockify():
+    proc = _websockify_procs.get("_main")
+    if proc and proc.poll() is None:
+        return True
+    try:
+        proc = _sp.Popen(
+            ["websockify", "--web", "/usr/share/novnc/",
+             "--token-plugin", "TokenFile",
+             "--token-source", WEBSOCKIFY_TARGETS,
+             f"127.0.0.1:{WEBSOCKIFY_PORT}"],
+            stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+    except FileNotFoundError:
+        return False
+    _websockify_procs["_main"] = proc
+    return True
+
+
+def _ws_warmup(vm_name, timeout=10):
+    """Block until a complete WebSocket upgrade through websockify to the
+    VM's VNC port relays the RFB greeting. This boots websockify's
+    forkserver and absorbs the first-connection race so the browser's
+    first connection is reliable."""
+    import base64
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            sock = socket.create_connection(("127.0.0.1", WEBSOCKIFY_PORT), timeout=1)
+        except OSError:
+            time.sleep(0.2)
+            continue
+        try:
+            sock.settimeout(2)
+            key = base64.b64encode(os.urandom(16)).decode()
+            req = ("GET /?token={} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n"
+                   "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                   "Sec-WebSocket-Key: {}\r\nSec-WebSocket-Version: 13\r\n\r\n").format(
+                       vm_name, WEBSOCKIFY_PORT, key)
+            sock.sendall(req.encode())
+            resp = b""
+            while b"\r\n\r\n" not in resp:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                resp += chunk
+            if b"101" in resp:
+                rest = resp.partition(b"\r\n\r\n")[2]
+                while len(rest) < 12:
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        break
+                    rest += chunk
+                if b"RFB" in rest:
+                    return True
+        except OSError:
+            pass
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
+        time.sleep(0.2)
+    return False
 
 
 @app.route("/api/vm/<name>/snapshots")
@@ -1990,24 +2081,7 @@ def api_vm_status(name):
 
 @app.route("/api/vm/<name>/console-proxy", methods=["POST", "DELETE"])
 def console_proxy(name):
-    import subprocess, signal
-
     if request.method == "DELETE":
-        proc = _websockify_procs.pop(name, None)
-        if proc:
-            if proc.poll() is None:
-                proc.kill()
-                try:
-                    proc.wait(timeout=3)
-                except Exception:
-                    pass
-        try:
-            subprocess.run(
-                ["pkill", "-9", "-f", "websockify"],
-                capture_output=True, timeout=5
-            )
-        except Exception:
-            pass
         return jsonify({"success": True})
 
     conn = get_conn()
@@ -2017,46 +2091,22 @@ def console_proxy(name):
         conn.close()
         return jsonify({"error": f"VM '{name}' が見つかりません"}), 404
 
-    xml_str = dom.XMLDesc(0)
-    root = ET.fromstring(xml_str)
-    vnc_port = None
-    for graphics in root.findall(".//graphics"):
-        if graphics.get("type") == "vnc":
-            vnc_port = graphics.get("port", "")
-            break
+    vnc_port = _vm_vnc_port(dom)
+    if not vnc_port:
+        conn.close()
+        return jsonify({"error": "VNCポートが未割り当てです（VMが起動していない可能性があります）"}), 400
+
+    if not _ensure_websockify():
+        conn.close()
+        return jsonify({"error": "websockifyがインストールされていません。 sudo apt install novnc python3-websockify"}), 500
+
+    _write_targets(conn)
     conn.close()
 
-    if not vnc_port:
-        return jsonify({"error": "VNCが有効ではありません"}), 400
+    if not _ws_warmup(name):
+        return jsonify({"error": "コンソールの準備に失敗しました。もう一度お試しください"}), 503
 
-    proc = _websockify_procs.get(name)
-    if proc and proc.poll() is None:
-        try:
-            import urllib.request
-            urllib.request.urlopen(f"http://127.0.0.1:{WEBSOCKIFY_PORT}/", timeout=2)
-            return jsonify({"ws_port": WEBSOCKIFY_PORT, "ws_url": _ws_url()})
-        except Exception:
-            proc.kill()
-            proc.wait(timeout=3)
-    _websockify_procs.pop(name, None)
-
-    try:
-        import subprocess as sp
-        sp.run(["pkill", "-9", "-f", "websockify"], capture_output=True, timeout=5)
-        import time as _time
-        _time.sleep(0.3)
-
-        proc = subprocess.Popen(
-            ["websockify", "--web", "/usr/share/novnc/", f"127.0.0.1:{WEBSOCKIFY_PORT}", f"127.0.0.1:{vnc_port}"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-        proc.ws_port = WEBSOCKIFY_PORT
-        _websockify_procs[name] = proc
-        return jsonify({"ws_port": WEBSOCKIFY_PORT, "ws_url": _ws_url()})
-    except FileNotFoundError:
-        return jsonify({"error": "websockifyがインストールされていません。 sudo apt install novnc python3-websockify"}), 500
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    return jsonify({"ws_port": WEBSOCKIFY_PORT, "ws_url": _ws_url(name)})
 
 
 @app.route("/vm/<name>/console")

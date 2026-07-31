@@ -25,6 +25,7 @@ logs/
 # ランタイム生成物
 *.pid
 *.sock
+websockify-targets.cfg
 
 # OS 固有
 .DS_Store

@@ -9,6 +9,8 @@ libvirt / QEMU 上の仮想マシンを Web ブラウザから管理するため
 - [Tailscale serve](https://tailscale.com) により HTTPS 化し、**Tailnet 内からのみ**アクセス可能
 - アプリは `127.0.0.1:8090` のみで待ち受けるため、**LAN からは直接アクセス不可**
 
+<img width="512" height="371" alt="Image" src="https://github.com/user-attachments/assets/69ae861b-93c6-4417-a901-96af7a467dfa" />
+
 ## インストール方法
 
 インストールスクリプトを GitHub からダウンロードして、root で実行します。
@@ -81,3 +83,8 @@ python3 -m venv --system-site-packages venv
 venv/bin/pip install flask
 venv/bin/python app.py   # http://127.0.0.1:8090
 ```
+<img width="512" height="327" alt="Image" src="https://github.com/user-attachments/assets/0e960f37-8bf6-4561-88c8-f1ab387fa69a" />
+
+## ライセンス
+
+このプロジェクトは [MIT License](LICENSE) の下で公開されています。

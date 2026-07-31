@@ -84,7 +84,7 @@ async function connect() {
 
         wsPort = data.ws_port;
         setStatus('接続中...', 'connecting');
-        const wsUrl = `ws://${location.hostname}:${wsPort}`;
+        const wsUrl = data.ws_url || `wss://${location.host}/websockify`;
 
         rfb = new RFB(container, wsUrl, {
             credentials: {},

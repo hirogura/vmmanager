@@ -1817,6 +1817,13 @@ def api_networks():
 
 _websockify_procs = {}
 
+WEBSOCKIFY_PORT = 6080
+
+
+def _ws_url():
+    return f"wss://{request.host}/websockify"
+
+
 import subprocess as _sp
 try:
     _sp.run(["pkill", "-9", "-f", "websockify"], capture_output=True, timeout=5)
@@ -2024,15 +2031,13 @@ def console_proxy(name):
 
     proc = _websockify_procs.get(name)
     if proc and proc.poll() is None:
-        ws_port = proc.ws_port if hasattr(proc, 'ws_port') else None
-        if ws_port:
-            try:
-                import urllib.request
-                urllib.request.urlopen(f"http://127.0.0.1:{ws_port}/", timeout=2)
-                return jsonify({"ws_port": ws_port})
-            except Exception:
-                proc.kill()
-                proc.wait(timeout=3)
+        try:
+            import urllib.request
+            urllib.request.urlopen(f"http://127.0.0.1:{WEBSOCKIFY_PORT}/", timeout=2)
+            return jsonify({"ws_port": WEBSOCKIFY_PORT, "ws_url": _ws_url()})
+        except Exception:
+            proc.kill()
+            proc.wait(timeout=3)
     _websockify_procs.pop(name, None)
 
     try:
@@ -2041,20 +2046,13 @@ def console_proxy(name):
         import time as _time
         _time.sleep(0.3)
 
-        import socket
-        s = socket.socket()
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind(("", 0))
-        ws_port = s.getsockname()[1]
-        s.close()
-
         proc = subprocess.Popen(
-            ["websockify", "--web", "/usr/share/novnc/", str(ws_port), f"127.0.0.1:{vnc_port}"],
+            ["websockify", "--web", "/usr/share/novnc/", f"127.0.0.1:{WEBSOCKIFY_PORT}", f"127.0.0.1:{vnc_port}"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
-        proc.ws_port = ws_port
+        proc.ws_port = WEBSOCKIFY_PORT
         _websockify_procs[name] = proc
-        return jsonify({"ws_port": ws_port})
+        return jsonify({"ws_port": WEBSOCKIFY_PORT, "ws_url": _ws_url()})
     except FileNotFoundError:
         return jsonify({"error": "websockifyがインストールされていません。 sudo apt install novnc python3-websockify"}), 500
     except Exception as e:

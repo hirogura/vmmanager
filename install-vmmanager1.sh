@@ -98,6 +98,7 @@ echo "  ※ アプリは 127.0.0.1 のみで待ち受け、LAN からは直接�
 echo "  ※ Tailnet 内からのみ HTTPS でアクセスできます。"
 tailscale up
 tailscale serve --bg --yes --https="${PORT}" "http://127.0.0.1:${PORT}"
+tailscale serve --bg --yes --https="${PORT}" --set-path="/websockify" "http://127.0.0.1:6080"
 
 echo ""
 echo "=========================================="

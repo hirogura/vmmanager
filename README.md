@@ -28,6 +28,7 @@ sudo ./install-vmmanager1.sh
 5. Python 仮想環境と Flask のセットアップ
 6. systemd サービス (`vm-manage.service`) の作成・起動
 7. `tailscale serve` でポート `8090` を HTTPS 公開（Tailnet 内のみ）
+   - さらに `/websockify` を VNC コンソール（WebSocket）用に同じ `8090` 上で公開
 
 ### アクセス方法
 
@@ -60,6 +61,7 @@ Tailscale serve の公開設定も削除する場合:
 
 ```bash
 sudo tailscale serve --https=8090 off
+sudo tailscale serve --https=8090 --set-path=/websockify off
 ```
 
 Tailscale 自体をアンインストールする場合:

@@ -1780,6 +1780,7 @@ def api_iso_files():
     conn = get_conn()
     isos = []
     iso_exts = ('.iso', '.img', '.raw', '.qcow2', '.vmdk', '.vhdx', '.vdi')
+    seen = set()
     for pname in conn.listStoragePools():
         try:
             pool = conn.storagePoolLookupByName(pname)
@@ -1788,15 +1789,39 @@ def api_iso_files():
                 if any(vol_name.lower().endswith(ext) for ext in iso_exts):
                     vol = pool.storageVolLookupByName(vol_name)
                     vol_info = vol.info()
+                    vol_path = vol.path()
+                    seen.add(vol_path)
                     isos.append({
                         "name": vol_name,
-                        "path": vol.path(),
+                        "path": vol_path,
                         "pool": pname,
                         "size_mb": vol_info[1] // (1024 * 1024),
                         "label": f"[{pname}] {vol_name} ({vol_info[1] // (1024 * 1024)} MB)",
                     })
         except Exception:
             continue
+    for dname in os.getenv("ISO_DIRS", "/iso").split(":"):
+        dname = dname.strip()
+        if not dname or not os.path.isdir(dname):
+            continue
+        try:
+            entries = os.listdir(dname)
+        except Exception:
+            continue
+        for entry in sorted(entries, key=str.lower):
+            if not any(entry.lower().endswith(ext) for ext in iso_exts):
+                continue
+            fpath = os.path.join(dname, entry)
+            if fpath in seen:
+                continue
+            size_mb = os.path.getsize(fpath) // (1024 * 1024) if os.path.isfile(fpath) else 0
+            isos.append({
+                "name": entry,
+                "path": fpath,
+                "pool": dname,
+                "size_mb": size_mb,
+                "label": f"[{dname}] {entry} ({size_mb} MB)",
+            })
     conn.close()
     return jsonify(isos)
 

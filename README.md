@@ -26,11 +26,14 @@ sudo ./install-vmmanager1.sh
 
 1. システムパッケージのインストール（Python, libvirt, QEMU, noVNC など）
 2. `libvirtd` サービスの有効化
-3. Tailscale のインストール（未導入の場合）
-4. GitHub リポジトリからアプリ本体を `/opt/vm-manage` に取得
-5. Python 仮想環境と Flask のセットアップ
-6. systemd サービス (`vm-manage.service`) の作成・起動
-7. `tailscale serve` でポート `8090` を HTTPS 公開（Tailnet 内のみ）
+3. ストレージプールの設定
+   - デフォルトプール `default` を `/opt/vm` に向けます（`/opt/vm` が無ければ作成します）
+   - `/opt/iso` ディレクトリが存在する場合は `iso` プールとして追加します
+4. Tailscale のインストール（未導入の場合）
+5. GitHub リポジトリからアプリ本体を `/opt/vm-manage` に取得
+6. Python 仮想環境と Flask のセットアップ
+7. systemd サービス (`vm-manage.service`) の作成・起動
+8. `tailscale serve` でポート `8090` を HTTPS 公開（Tailnet 内のみ）
    - さらに `/websockify` を VNC コンソール（WebSocket）用に同じ `8090` 上で公開
 
 ### アクセス方法

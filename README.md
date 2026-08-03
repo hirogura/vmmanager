@@ -28,7 +28,7 @@ sudo ./install-vmmanager1.sh
 2. `libvirtd` サービスの有効化
 3. ストレージプールの設定
    - デフォルトプール `default` を `/opt/vm` に向けます（`/opt/vm` が無ければ作成します）
-   - `/opt/iso` ディレクトリが存在する場合は `iso` プールとして追加します
+   - `/iso` ディレクトリが存在する場合は `iso` プールとして追加します
 4. Tailscale のインストール（未導入の場合）
 5. GitHub リポジトリからアプリ本体を `/opt/vm-manage` に取得
 6. Python 仮想環境と Flask のセットアップ

@@ -63,13 +63,13 @@ fi
 virsh pool-start default >/dev/null 2>&1 || true
 echo "  default プール: /opt/vm"
 
-# /opt/iso があれば iso プールを追加
-if [ -d /opt/iso ]; then
+# /iso があれば iso プールを追加
+if [ -d /iso ]; then
     if ! virsh pool-info iso >/dev/null 2>&1; then
-        virsh pool-define-as iso dir --target /opt/iso
+        virsh pool-define-as iso dir --target /iso
         virsh pool-autostart iso
         virsh pool-start iso >/dev/null 2>&1 || true
-        echo "  iso プール: /opt/iso を追加しました"
+        echo "  iso プール: /iso を追加しました"
     else
         echo "  iso プール: 既に存在します"
     fi

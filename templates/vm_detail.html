@@ -27,7 +27,6 @@
     </div>
 </div>
 
-{% if is_active %}
 <div class="card console-card">
     <div class="console-header">
         <i class="fas fa-terminal" style="color:var(--text-muted)"></i>
@@ -48,7 +47,6 @@
     <div id="vnc-container" style="width:40%;aspect-ratio:4/3;background:#000;display:flex;align-items:center;justify-content:center;position:relative;transition:all 0.3s">
     </div>
 </div>
-{% endif %}
 
 <div class="card">
     <div class="card-header">
@@ -1102,11 +1100,11 @@ function deleteSnapshot(snapName) {
 }
 </script>
 
-{% if is_active %}
 <script type="module">
 import RFB from '/novnc/core/rfb.js';
 
 const vmName = "{{ vm.name }}";
+let vmActive = {{ 'true' if is_active else 'false' }};
 let rfb = null;
 let wsPort = null;
 let reconnectTimer = null;
@@ -1120,7 +1118,7 @@ const vncResizeKey = 'vnc-resize-session';
 
 if (btnResize) {
     const savedResize = localStorage.getItem(vncResizeKey);
-    btnResize.checked = savedResize === null ? true : savedResize === '1';
+    btnResize.checked = savedResize === null ? false : savedResize === '1';
     btnResize.addEventListener('change', () => {
         localStorage.setItem(vncResizeKey, btnResize.checked ? '1' : '0');
         if (rfb) rfb.resizeSession = btnResize.checked;
@@ -1136,6 +1134,12 @@ function setVncStatus(text, color) {
         vncStatus.textContent = text;
         vncStatus.style.background = color;
     }
+}
+
+function showVncStopped() {
+    cleanupRfb();
+    vncContainer.innerHTML = '<div style="color:var(--text-muted);font-size:12px">VM は停止中です。起動すると自動接続します。</div>';
+    setVncStatus('停止中', '#95a5a6');
 }
 
 function cleanupRfb() {
@@ -1174,6 +1178,8 @@ function scheduleReconnect() {
 async function connectVnc() {
     try {
         cleanupRfb();
+        if (!vmActive) { showVncStopped(); return; }
+        vncContainer.innerHTML = '';
         setVncStatus('プロキシ起動中...', '#f39c12');
         const resp = await fetch(`/api/vm/${vmName}/console-proxy`, { method: 'POST' });
         const data = await resp.json();
@@ -1267,7 +1273,11 @@ window.addEventListener('beforeunload', () => {
     cleanupRfb();
 });
 
-connectVnc();
+if (vmActive) {
+    connectVnc();
+} else {
+    showVncStopped();
+}
 
 window.cleanupRfb = cleanupRfb;
 window.connectVnc = connectVnc;
@@ -1276,12 +1286,14 @@ const statusPoll = setInterval(async () => {
     try {
         const resp = await fetch(`/api/vm/${vmName}/status`);
         const data = await resp.json();
-        if (!data.active) {
+        if (data.active && !vmActive) {
+            vmActive = true;
+            connectVnc();
+        } else if (!data.active && vmActive) {
             clearInterval(statusPoll);
             location.reload();
         }
     } catch(e) {}
 }, 3000);
 </script>
-{% endif %}
 {% endblock %}

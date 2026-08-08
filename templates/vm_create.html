@@ -36,11 +36,9 @@
         <div class="form-group">
             <label>マシンタイプ</label>
             <select name="machine">
-                <option value="pc-q35-10.2" selected>pc-q35-10.2 (Q35)</option>
-                <option value="pc-q35-9.1">pc-q35-9.1</option>
-                <option value="pc-q35-9.0">pc-q35-9.0</option>
-                <option value="pc-i440fx-9.1">pc-i440fx-9.1</option>
-                <option value="virt">virt (ARM)</option>
+                {% for m in machine_types %}
+                <option value="{{ m.name }}" {% if loop.first %}selected{% endif %}>{{ m.label }}</option>
+                {% endfor %}
             </select>
         </div>
         <div class="form-group">

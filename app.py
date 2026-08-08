@@ -66,6 +66,34 @@ def _vm_info(dom):
     }
 
 
+def _machine_types(conn):
+    machines = set()
+    caps = ET.fromstring(conn.getCapabilities())
+    for guest in caps.findall("guest"):
+        arch = guest.find("arch")
+        if arch is None or arch.get("name") not in ("x86_64", "i686"):
+            continue
+        for m in arch.findall("machine"):
+            name = (m.text or "").strip()
+            if not name or m.get("deprecated") == "yes":
+                continue
+            parts = name.split("-")
+            if len(parts) == 3 and parts[0] == "pc" and parts[1] in ("q35", "i440fx"):
+                ver = parts[2].split(".")
+                if len(ver) == 2 and all(p.isdigit() for p in ver):
+                    machines.add(name)
+
+    def sort_key(m):
+        fam = 0 if "q35" in m else 1
+        major, minor = m.split("-")[-1].split(".")
+        return (fam, -int(major), -int(minor))
+
+    return [
+        {"name": m, "label": f"{m} (Q35)" if "q35" in m else m}
+        for m in sorted(machines, key=sort_key)
+    ]
+
+
 @app.route("/vm/<name>")
 def vm_detail(name):
     conn = get_conn()
@@ -176,10 +204,12 @@ def vm_detail(name):
     except Exception:
         pass
 
+    machine_types = _machine_types(conn)
     conn.close()
     return render_template(
         "vm_detail.html",
         vm=_vm_info(dom),
+        machine_types=machine_types,
         xml=xml_str,
         devices=devices,
         os_info=os_info,
@@ -1155,6 +1185,7 @@ def vm_create():
     except Exception:
         pass
 
+    machine_types = _machine_types(conn)
     conn.close()
 
     if request.method == "POST":
@@ -1224,6 +1255,7 @@ def vm_create():
         networks=networks,
         hostdevs=hostdevs,
         usb_devices=usb_devices,
+        machine_types=machine_types,
     )
 
 

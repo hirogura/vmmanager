@@ -72,8 +72,12 @@
         <div class="form-group" style="margin:0">
             <label>マシン</label>
             <select name="machine" {% if is_active %}disabled{% endif %}>
-                {% for m in ['pc-q35-10.2','pc-q35-9.1','pc-q35-9.0','pc-i440fx-9.1','virt'] %}
-                <option value="{{ m }}" {% if os_info.machine == m %}selected{% endif %}>{{ m }}</option>
+                {% set current_machine = os_info.machine %}
+                {% if current_machine and current_machine not in machine_types|map(attribute='name')|list %}
+                <option value="{{ current_machine }}" selected>{{ current_machine }}</option>
+                {% endif %}
+                {% for m in machine_types %}
+                <option value="{{ m.name }}" {% if os_info.machine == m.name %}selected{% endif %}>{{ m.label }}</option>
                 {% endfor %}
             </select>
         </div>

@@ -8,7 +8,7 @@
     <meta http-equiv="Expires" content="0">
     <title>{% block title %}VM Manager{% endblock %}</title>
     <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=23">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=24">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
 </head>
 <body>
@@ -19,6 +19,7 @@
         </div>
         <ul class="sidebar-menu">
             <li><a href="/vm/create" class="{% if request.endpoint == 'vm_create' %}active{% endif %}"><i class="fas fa-plus-circle"></i> 新規作成</a></li>
+            <li><button type="button" id="btn-server-restart" class="sidebar-btn"><i class="fas fa-sync-alt"></i> サーバ再起動</button></li>
         </ul>
         <div class="sidebar-section">仮想マシン</div>
         <div class="sidebar-vm-list">
@@ -43,7 +44,7 @@
         {% endwith %}
         {% block content %}{% endblock %}
     </main>
-    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/app.js') }}?v=24"></script>
     {% block scripts %}{% endblock %}
 </body>
 </html>

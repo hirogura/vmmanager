@@ -81,6 +81,25 @@ body {
 .sidebar-menu li a:hover { background: var(--bg-hover); color: var(--text-primary); }
 .sidebar-menu li a.active { background: var(--accent-subtle); color: var(--accent); border-right: 2px solid var(--accent); }
 
+.sidebar-menu li .sidebar-btn {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 6px 16px;
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 12px;
+    cursor: pointer;
+    text-align: left;
+    transition: all 0.15s;
+    font-family: inherit;
+}
+
+.sidebar-menu li .sidebar-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+.sidebar-menu li .sidebar-btn:disabled { opacity: 0.5; cursor: default; }
+
 .sidebar-section {
     padding: 8px 16px 4px;
     font-size: 10px;

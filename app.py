@@ -423,6 +423,9 @@ def _build_edit_xml(config):
     existing_usbs = config.get("existing_usbs", [])
     usb_hostdevs = config.get("usb_hostdevs", [])
     boot_order = config.get("boot_order", [])
+    boot_map = {}
+    for _idx, _dev in enumerate(boot_order):
+        boot_map[_dev] = _idx + 1
 
     lines = []
     lines.append(f'<domain type="{domain_type}">')
@@ -454,21 +457,12 @@ def _build_edit_xml(config):
             lines.append("      <feature enabled='no' name='enrolled-keys'/>")
             lines.append("      <feature enabled='no' name='secure-boot'/>")
             lines.append("    </firmware>")
-            lines.append("    <loader readonly='yes' secure='no' type='pflash' stateless='yes' format='raw'>/usr/share/ovmf/OVMF.amdsev.fd</loader>")
-        if boot_order:
-            for dev in boot_order:
-                lines.append(f"    <boot dev='{dev}'/>")
-        else:
-            lines.append("    <boot dev='hd'/>")
+            lines.append("    <loader readonly='yes' type='pflash' format='raw'>/usr/share/OVMF/OVMF_CODE_4M.fd</loader>")
+            lines.append(f"    <nvram template='/usr/share/OVMF/OVMF_VARS_4M.fd'>/var/lib/libvirt/qemu/nvram/{name}_VARS.fd</nvram>")
         lines.append("    <bootmenu enable='yes'/>")
     else:
         lines.append("  <os>")
         lines.append(f"    <type arch='{arch}' machine='{machine}'>hvm</type>")
-        if boot_order:
-            for dev in boot_order:
-                lines.append(f"    <boot dev='{dev}'/>")
-        else:
-            lines.append("    <boot dev='hd'/>")
     lines.append("  </os>")
     lines.append("  <features><acpi/><apic/></features>")
     lines.append("  <clock offset='utc'/>")
@@ -502,6 +496,9 @@ def _build_edit_xml(config):
         target_dev = ed.get("target_dev", "vda")
         target_bus = ed.get("target_bus", "virtio")
         lines.append(f"      <target dev='{target_dev}' bus='{target_bus}'/>")
+        boot_n = boot_map.get(target_dev)
+        if boot_n:
+            lines.append(f"      <boot order='{boot_n}'/>")
         if ed.get("readonly"):
             lines.append("      <readonly/>")
         lines.append("    </disk>")
@@ -1379,7 +1376,8 @@ def _build_vm_xml(config):
             lines.append("      <feature enabled='no' name='enrolled-keys'/>")
             lines.append("      <feature enabled='no' name='secure-boot'/>")
             lines.append("    </firmware>")
-            lines.append("    <loader readonly='yes' secure='no' type='pflash' stateless='yes' format='raw'>/usr/share/ovmf/OVMF.amdsev.fd</loader>")
+            lines.append("    <loader readonly='yes' type='pflash' format='raw'>/usr/share/OVMF/OVMF_CODE_4M.fd</loader>")
+            lines.append(f"    <nvram template='/usr/share/OVMF/OVMF_VARS_4M.fd'>/var/lib/libvirt/qemu/nvram/{name}_VARS.fd</nvram>")
         if boot_order:
             for dev in boot_order:
                 lines.append(f"    <boot dev='{dev}'/>")
@@ -2143,6 +2141,18 @@ def vm_console(name):
 def novnc_static(filename):
     from flask import send_from_directory
     return send_from_directory("/usr/share/novnc", filename)
+
+
+@app.route("/api/server/restart", methods=["POST"])
+def server_restart():
+    import subprocess
+    import threading
+
+    def _restart():
+        subprocess.run(["sudo", "systemctl", "restart", "vm-manage"])
+
+    threading.Thread(target=_restart, daemon=True).start()
+    return jsonify({"success": True})
 
 
 if __name__ == "__main__":

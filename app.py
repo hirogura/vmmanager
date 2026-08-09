@@ -5,11 +5,19 @@ import socket
 import time
 from xml.etree import ElementTree as ET
 from flask import Flask, render_template, request, jsonify, redirect, url_for, flash
+from werkzeug.exceptions import RequestEntityTooLarge
+from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
+app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024 * 1024
 
 LIBVIRT_URI = "qemu:///system"
+
+
+@app.errorhandler(RequestEntityTooLarge)
+def handle_too_large(e):
+    return jsonify({"error": "ファイルが大きすぎます（200GB制限）"}), 413
 
 
 @app.context_processor
@@ -2242,6 +2250,89 @@ def server_restart():
 @app.route("/tools/image-to-disk")
 def image_to_disk():
     return render_template("image_to_disk.html")
+
+
+@app.route("/tools/upload")
+def tool_upload():
+    import shutil
+    conn = get_conn()
+    pool_dir = "/opt/vm"
+    pool_name = "default"
+    try:
+        pool = conn.storagePoolLookupByName("default")
+        pool_name = pool.name()
+        pool.refresh(0)
+        pool_xml = ET.fromstring(pool.XMLDesc(0))
+        path_el = pool_xml.find("target/path")
+        if path_el is not None:
+            pool_dir = path_el.text
+    except Exception:
+        pass
+    finally:
+        conn.close()
+    free_gb = 0
+    try:
+        free_gb = shutil.disk_usage(pool_dir).free // (1024 ** 3)
+    except Exception:
+        pass
+    return render_template(
+        "upload.html",
+        pool_dir=pool_dir,
+        pool_name=pool_name,
+        free_gb=free_gb,
+    )
+
+
+@app.route("/api/upload", methods=["POST"])
+def api_upload():
+    import shutil
+    import subprocess
+    pool_dir = "/opt/vm"
+    conn = get_conn()
+    try:
+        pool = conn.storagePoolLookupByName("default")
+        pool.refresh(0)
+        pool_xml = ET.fromstring(pool.XMLDesc(0))
+        path_el = pool_xml.find("target/path")
+        if path_el is not None:
+            pool_dir = path_el.text
+    except Exception:
+        pass
+    finally:
+        conn.close()
+
+    f = request.files.get("file")
+    if not f or not f.filename:
+        return jsonify({"error": "ファイルが選択されていません"}), 400
+
+    filename = secure_filename(f.filename)
+    if not filename.lower().endswith((".iso", ".qcow2", ".img")):
+        return jsonify({"error": ".iso / .qcow2 / .img ファイルのみアップロードできます"}), 400
+
+    try:
+        free_bytes = shutil.disk_usage(pool_dir).free
+        length = request.content_length or 0
+        if length and free_bytes < length:
+            return jsonify({"error": "ストレージの空き容量が不足しています"}), 400
+    except Exception:
+        pass
+
+    dest = os.path.join(pool_dir, filename)
+    try:
+        f.save(dest)
+    except Exception as e:
+        return jsonify({"error": f"保存に失敗しました: {e}"}), 500
+
+    subprocess.run(["sudo", "chown", "libvirt-qemu:kvm", dest], capture_output=True, timeout=5)
+    subprocess.run(["sudo", "chmod", "0644", dest], capture_output=True, timeout=5)
+
+    size = os.path.getsize(dest)
+    return jsonify({
+        "success": True,
+        "name": filename,
+        "path": dest,
+        "size_mb": size // (1024 * 1024),
+    })
 
 
 def _cmd_tail_output(cmd, timeout):

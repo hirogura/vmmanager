@@ -1,0 +1,150 @@
+{% extends "base.html" %}
+{% block title %}ISOアップロード - VM Manager{% endblock %}
+{% block content %}
+<div class="action-bar">
+    <h1 style="margin:0"><i class="fas fa-upload"></i> ISOアップロード</h1>
+    <span class="spacer"></span>
+</div>
+
+<div class="card" style="margin-bottom:16px">
+    <div class="card-header">
+        <h2><i class="fas fa-cloud-upload-alt"></i> ファイルアップロード</h2>
+    </div>
+    <p style="color:var(--text-muted);font-size:11px;margin-bottom:8px">
+        アップロード先: <code>{{ pool_dir }}</code>（プール: {{ pool_name }}、空き: {{ free_gb }} GB）
+    </p>
+    <div class="form-group">
+        <label>ファイル (.iso / .qcow2 / .img)</label>
+        <input type="file" id="file-input" accept=".iso,.qcow2,.img" style="width:100%">
+    </div>
+    <div id="file-info" style="font-size:12px;color:var(--text-secondary);margin-bottom:8px"></div>
+    <div id="overwrite-warn" style="display:none;background:var(--warning-bg);border:1px solid var(--warning);color:var(--warning);padding:8px;border-radius:var(--radius);margin-bottom:10px"></div>
+    <div class="btn-group">
+        <button type="button" id="btn-upload" class="btn btn-primary" disabled><i class="fas fa-upload"></i> アップロード</button>
+        <button type="button" class="btn btn-secondary" onclick="location.reload()"><i class="fas fa-sync"></i> 再読み込み</button>
+    </div>
+    <div id="progress-wrap" style="display:none;margin-top:10px">
+        <div style="background:var(--bg-input);border-radius:var(--radius);height:12px;overflow:hidden">
+            <div id="progress-bar" style="background:var(--accent);height:100%;width:0%;transition:width 0.2s"></div>
+        </div>
+        <div id="progress-text" style="font-size:11px;color:var(--text-secondary);margin-top:4px"></div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2><i class="fas fa-list"></i> 既存ファイル</h2>
+    </div>
+    <div id="file-list"><p style="color:var(--text-muted);font-size:11px">読み込み中...</p></div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+let existingNames = [];
+
+function fmtSize(bytes) {
+    if (bytes >= 1024 * 1024 * 1024) return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
+    if (bytes >= 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    return (bytes / 1024).toFixed(0) + ' KB';
+}
+
+function loadFiles() {
+    fetch('/api/storage-pool-volumes')
+        .then(r => r.json())
+        .then(vols => {
+            existingNames = vols.map(v => v.name);
+            const list = document.getElementById('file-list');
+            if (!vols.length) {
+                list.innerHTML = '<p style="color:var(--text-muted);font-size:11px">ファイルがありません</p>';
+                return;
+            }
+            list.innerHTML = '';
+            vols.slice().sort((a, b) => b.name.localeCompare(a.name)).forEach(v => {
+                const row = document.createElement('div');
+                row.style.cssText = 'display:flex;justify-content:space-between;gap:8px;padding:4px 0;border-bottom:1px solid var(--border)';
+                const size = v.size_mb >= 1024 ? (v.size_mb / 1024).toFixed(1) + ' GB' : v.size_mb + ' MB';
+                row.innerHTML = `<span>${v.name}</span><span style="color:var(--text-muted);font-size:11px">${size}</span>`;
+                list.appendChild(row);
+            });
+        })
+        .catch(() => {
+            document.getElementById('file-list').innerHTML = '<p style="color:var(--text-muted);font-size:11px">読み込み失敗</p>';
+        });
+}
+
+document.getElementById('file-input').addEventListener('change', function() {
+    const file = this.files[0];
+    const info = document.getElementById('file-info');
+    const warn = document.getElementById('overwrite-warn');
+    const btn = document.getElementById('btn-upload');
+    if (!file) {
+        info.textContent = '';
+        warn.style.display = 'none';
+        btn.disabled = true;
+        return;
+    }
+    info.textContent = file.name + ' (' + fmtSize(file.size) + ')';
+    if (existingNames.includes(file.name)) {
+        warn.style.display = 'block';
+        warn.textContent = '警告: 同名のファイルが既に存在します。アップロードすると上書きされます。';
+    } else {
+        warn.style.display = 'none';
+    }
+    btn.disabled = false;
+});
+
+document.getElementById('btn-upload').addEventListener('click', function() {
+    const input = document.getElementById('file-input');
+    const file = input.files[0];
+    if (!file) return;
+    if (existingNames.includes(file.name) && !confirm('同名ファイルが存在します。上書きしますか？')) return;
+
+    const xhr = new XMLHttpRequest();
+    const btn = this;
+    const wrap = document.getElementById('progress-wrap');
+    const bar = document.getElementById('progress-bar');
+    const text = document.getElementById('progress-text');
+    btn.disabled = true;
+    wrap.style.display = 'block';
+    bar.style.width = '0%';
+    text.textContent = 'アップロード準備中...';
+
+    xhr.open('POST', '/api/upload');
+    xhr.upload.onprogress = function(e) {
+        if (e.lengthComputable) {
+            const pct = Math.round(e.loaded / e.total * 100);
+            bar.style.width = pct + '%';
+            text.textContent = fmtSize(e.loaded) + ' / ' + fmtSize(e.total) + ' (' + pct + '%)';
+        }
+    };
+    xhr.onload = function() {
+        let data = {};
+        try { data = JSON.parse(xhr.responseText); } catch(e) {}
+        if (xhr.status === 200 && data.success) {
+            text.textContent = 'アップロード完了: ' + data.name;
+            alert('アップロードが完了しました: ' + data.name);
+            input.value = '';
+            document.getElementById('file-info').textContent = '';
+            document.getElementById('overwrite-warn').style.display = 'none';
+            loadFiles();
+        } else {
+            text.textContent = 'エラー: ' + (data.error || '不明なエラー');
+            alert('アップロードエラー: ' + (data.error || '不明なエラー'));
+        }
+        btn.disabled = false;
+        bar.style.width = '100%';
+    };
+    xhr.onerror = function() {
+        text.textContent = '通信エラー';
+        alert('通信エラーが発生しました');
+        btn.disabled = false;
+    };
+
+    const fd = new FormData();
+    fd.append('file', file);
+    xhr.send(fd);
+});
+
+loadFiles();
+</script>
+{% endblock %}

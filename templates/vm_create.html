@@ -14,7 +14,13 @@
     <h2><i class="fas fa-cog"></i> 基本設定</h2>
     <div class="form-group">
         <label>VM名 *</label>
-        <input type="text" name="name" required placeholder="例: win11, ubuntu2604">
+        <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">
+            <input type="text" name="name" required placeholder="例: win11, ubuntu2604" style="flex:1;min-width:200px">
+            <div class="checkbox-group" style="white-space:nowrap">
+                <input type="checkbox" name="hyperv_enabled" id="hyperv_enabled">
+                <label for="hyperv_enabled">Hyper-V拡張を有効化（Windows11などをインストールする場合はOnに）</label>
+            </div>
+        </div>
     </div>
     <div class="form-row">
         <div class="form-group">
@@ -175,7 +181,8 @@ function collectFormData() {
         disk_pool: f.elements['disk_pool'].value,
         disk_bus: f.elements['disk_bus'].value,
         existing_disk_path: f.elements['existing_disk_path'] ? f.elements['existing_disk_path'].value : '',
-        tpm_enabled: f.elements['tpm_enabled'].checked
+        tpm_enabled: f.elements['tpm_enabled'].checked,
+        hyperv_enabled: f.elements['hyperv_enabled'].checked
     };
 }
 

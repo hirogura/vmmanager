@@ -111,6 +111,10 @@
             <input type="checkbox" name="secure_boot" id="secure_boot" {% if vm_config.secure_boot %}checked{% endif %} {% if is_active %}disabled{% endif %}>
             <label for="secure_boot">Secure Boot</label>
         </div>
+        <div class="checkbox-group">
+            <input type="checkbox" name="hyperv_enabled" id="hyperv_enabled" {% if vm_config.hyperv_enabled %}checked{% endif %} {% if is_active %}disabled{% endif %}>
+            <label for="hyperv_enabled">Hyper-V拡張（Windowsゲスト用）</label>
+        </div>
     </div>
 </div>
 
@@ -646,6 +650,7 @@ async function collectFormData() {
         uefi: fd.has('uefi'),
         tpm_enabled: fd.has('tpm_enabled'),
         secure_boot: fd.has('secure_boot'),
+        hyperv_enabled: fd.has('hyperv_enabled'),
         sound_enabled: fd.has('sound_enabled'),
         channel_spice: fd.has('channel_spice'),
         usb_tablet: fd.has('usb_tablet'),

@@ -136,6 +136,7 @@ def vm_detail(name):
         "usb_tablet": root.find(".//input[@type='tablet']") is not None,
         "usb_redirector_1": False,
         "usb_redirector_2": False,
+        "hyperv_enabled": root.find(".//features/hyperv") is not None,
     }
     firmware_el = root.find(".//firmware")
     if firmware_el is not None:
@@ -494,8 +495,35 @@ def _build_edit_xml(config):
         lines.append("  <os>")
         lines.append(f"    <type arch='{arch}' machine='{machine}'>hvm</type>")
     lines.append("  </os>")
-    lines.append("  <features><acpi/><apic/></features>")
-    lines.append("  <clock offset='utc'/>")
+    hyperv_enabled = config.get("hyperv_enabled", False)
+    if hyperv_enabled:
+        lines.append("  <features>")
+        lines.append("    <acpi/>")
+        lines.append("    <apic/>")
+        lines.append("    <hyperv>")
+        lines.append("      <relaxed state='on'/>")
+        lines.append("      <vapic state='on'/>")
+        lines.append("      <spinlocks state='on' retries='8191'/>")
+        lines.append("      <vpindex state='on'/>")
+        lines.append("      <runtime state='on'/>")
+        lines.append("      <synic state='on'/>")
+        lines.append("      <stimer state='on'/>")
+        lines.append("      <reset state='on'/>")
+        lines.append("      <frequencies state='on'/>")
+        lines.append("      <reenlightenment state='on'/>")
+        lines.append("      <tlbflush state='on'/>")
+        lines.append("      <ipi state='on'/>")
+        lines.append("    </hyperv>")
+        lines.append("  </features>")
+        lines.append("  <clock offset='localtime'>")
+        lines.append("    <timer name='rtc' tickpolicy='catchup'/>")
+        lines.append("    <timer name='pit' tickpolicy='delay'/>")
+        lines.append("    <timer name='hpet' present='no'/>")
+        lines.append("    <timer name='hypervclock' present='yes'/>")
+        lines.append("  </clock>")
+    else:
+        lines.append("  <features><acpi/><apic/></features>")
+        lines.append("  <clock offset='utc'/>")
     lines.append("  <devices>")
 
     if disk_order:
@@ -1425,11 +1453,35 @@ def _build_vm_xml(config):
         else:
             lines.append("    <boot dev='hd'/>")
     lines.append("  </os>")
+    hyperv_enabled = config.get("hyperv_enabled", False)
     lines.append("  <features>")
     lines.append("    <acpi/>")
     lines.append("    <apic/>")
+    if hyperv_enabled:
+        lines.append("    <hyperv>")
+        lines.append("      <relaxed state='on'/>")
+        lines.append("      <vapic state='on'/>")
+        lines.append("      <spinlocks state='on' retries='8191'/>")
+        lines.append("      <vpindex state='on'/>")
+        lines.append("      <runtime state='on'/>")
+        lines.append("      <synic state='on'/>")
+        lines.append("      <stimer state='on'/>")
+        lines.append("      <reset state='on'/>")
+        lines.append("      <frequencies state='on'/>")
+        lines.append("      <reenlightenment state='on'/>")
+        lines.append("      <tlbflush state='on'/>")
+        lines.append("      <ipi state='on'/>")
+        lines.append("    </hyperv>")
     lines.append("  </features>")
-    lines.append("  <clock offset='utc'/>")
+    if hyperv_enabled:
+        lines.append("  <clock offset='localtime'>")
+        lines.append("    <timer name='rtc' tickpolicy='catchup'/>")
+        lines.append("    <timer name='pit' tickpolicy='delay'/>")
+        lines.append("    <timer name='hpet' present='no'/>")
+        lines.append("    <timer name='hypervclock' present='yes'/>")
+        lines.append("  </clock>")
+    else:
+        lines.append("  <clock offset='utc'/>")
     lines.append("  <devices>")
 
     try:

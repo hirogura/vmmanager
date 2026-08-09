@@ -2252,15 +2252,11 @@ def image_to_disk():
     return render_template("image_to_disk.html")
 
 
-@app.route("/tools/upload")
-def tool_upload():
-    import shutil
+def _default_pool_dir():
     conn = get_conn()
     pool_dir = "/opt/vm"
-    pool_name = "default"
     try:
         pool = conn.storagePoolLookupByName("default")
-        pool_name = pool.name()
         pool.refresh(0)
         pool_xml = ET.fromstring(pool.XMLDesc(0))
         path_el = pool_xml.find("target/path")
@@ -2270,6 +2266,39 @@ def tool_upload():
         pass
     finally:
         conn.close()
+    return pool_dir
+
+
+def _file_in_use(path):
+    conn = get_conn()
+    in_use = []
+    try:
+        for dom_id in conn.listDomainsID():
+            dom = conn.lookupByID(dom_id)
+            root = ET.fromstring(dom.XMLDesc(0))
+            for src in root.findall(".//disk/source"):
+                if src.get("file") == path:
+                    in_use.append(dom.name())
+                    break
+        for name in conn.listDefinedDomains():
+            dom = conn.lookupByName(name)
+            root = ET.fromstring(dom.XMLDesc(0))
+            for src in root.findall(".//disk/source"):
+                if src.get("file") == path:
+                    in_use.append(name)
+                    break
+    except Exception:
+        pass
+    finally:
+        conn.close()
+    return in_use
+
+
+@app.route("/tools/upload")
+def tool_upload():
+    import shutil
+    pool_dir = _default_pool_dir()
+    pool_name = "default"
     free_gb = 0
     try:
         free_gb = shutil.disk_usage(pool_dir).free // (1024 ** 3)
@@ -2287,19 +2316,7 @@ def tool_upload():
 def api_upload():
     import shutil
     import subprocess
-    pool_dir = "/opt/vm"
-    conn = get_conn()
-    try:
-        pool = conn.storagePoolLookupByName("default")
-        pool.refresh(0)
-        pool_xml = ET.fromstring(pool.XMLDesc(0))
-        path_el = pool_xml.find("target/path")
-        if path_el is not None:
-            pool_dir = path_el.text
-    except Exception:
-        pass
-    finally:
-        conn.close()
+    pool_dir = _default_pool_dir()
 
     f = request.files.get("file")
     if not f or not f.filename:
@@ -2333,6 +2350,32 @@ def api_upload():
         "path": dest,
         "size_mb": size // (1024 * 1024),
     })
+
+
+@app.route("/api/upload/delete", methods=["POST"])
+def api_upload_delete():
+    data = request.json or {}
+    filename = (data.get("name") or "").strip()
+    if not filename:
+        return jsonify({"error": "ファイル名を指定してください"}), 400
+
+    pool_dir = _default_pool_dir()
+    safe = secure_filename(filename)
+    if safe != filename:
+        return jsonify({"error": "不正なファイル名です"}), 400
+    path = os.path.join(pool_dir, safe)
+    if not os.path.isfile(path):
+        return jsonify({"error": f"ファイルが見つかりません: {filename}"}), 404
+
+    in_use = _file_in_use(path)
+    if in_use:
+        return jsonify({"error": f"VM「{', '.join(in_use)}」で使用中のため削除できません"}), 400
+
+    try:
+        os.remove(path)
+    except Exception as e:
+        return jsonify({"error": f"削除に失敗しました: {e}"}), 500
+    return jsonify({"success": True})
 
 
 def _cmd_tail_output(cmd, timeout):

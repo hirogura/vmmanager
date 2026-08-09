@@ -54,22 +54,56 @@ function loadFiles() {
         .then(vols => {
             existingNames = vols.map(v => v.name);
             const list = document.getElementById('file-list');
+            list.innerHTML = '';
             if (!vols.length) {
                 list.innerHTML = '<p style="color:var(--text-muted);font-size:11px">ファイルがありません</p>';
                 return;
             }
-            list.innerHTML = '';
             vols.slice().sort((a, b) => b.name.localeCompare(a.name)).forEach(v => {
                 const row = document.createElement('div');
-                row.style.cssText = 'display:flex;justify-content:space-between;gap:8px;padding:4px 0;border-bottom:1px solid var(--border)';
-                const size = v.size_mb >= 1024 ? (v.size_mb / 1024).toFixed(1) + ' GB' : v.size_mb + ' MB';
-                row.innerHTML = `<span>${v.name}</span><span style="color:var(--text-muted);font-size:11px">${size}</span>`;
+                row.style.cssText = 'display:flex;justify-content:space-between;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--border)';
+                const nameSpan = document.createElement('span');
+                nameSpan.textContent = v.name;
+                const right = document.createElement('span');
+                right.style.cssText = 'display:flex;gap:8px;align-items:center';
+                const sizeSpan = document.createElement('span');
+                sizeSpan.style.cssText = 'color:var(--text-muted);font-size:11px';
+                sizeSpan.textContent = v.size_mb >= 1024 ? (v.size_mb / 1024).toFixed(1) + ' GB' : v.size_mb + ' MB';
+                const delBtn = document.createElement('button');
+                delBtn.type = 'button';
+                delBtn.className = 'btn btn-danger btn-sm btn-icon';
+                delBtn.title = '削除';
+                delBtn.innerHTML = '<i class="fas fa-trash"></i>';
+                delBtn.addEventListener('click', () => deleteFile(v.name));
+                right.appendChild(sizeSpan);
+                right.appendChild(delBtn);
+                row.appendChild(nameSpan);
+                row.appendChild(right);
                 list.appendChild(row);
             });
         })
         .catch(() => {
             document.getElementById('file-list').innerHTML = '<p style="color:var(--text-muted);font-size:11px">読み込み失敗</p>';
         });
+}
+
+function deleteFile(name) {
+    if (!confirm('ファイル「' + name + '」を削除しますか？\nこの操作は取り消せません。')) return;
+    fetch('/api/upload/delete', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name: name})
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) {
+            alert('エラー: ' + data.error);
+        } else {
+            alert('削除しました: ' + name);
+            loadFiles();
+        }
+    })
+    .catch(err => alert('通信エラー: ' + err));
 }
 
 document.getElementById('file-input').addEventListener('change', function() {

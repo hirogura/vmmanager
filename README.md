@@ -1,4 +1,4 @@
-# vmmanager
+# VM Manager
 
 libvirt / QEMU 上の仮想マシンを Web ブラウザから管理するための Web UI です。
 

@@ -2187,5 +2187,125 @@ def server_restart():
     return jsonify({"success": True})
 
 
+@app.route("/tools/image-to-disk")
+def image_to_disk():
+    return render_template("image_to_disk.html")
+
+
+def _cmd_tail_output(cmd, timeout):
+    import subprocess
+    import tempfile
+    with tempfile.TemporaryFile(mode="w+") as f:
+        proc = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT, text=True)
+        proc.wait(timeout=timeout)
+        f.seek(0)
+        data = f.read()
+    tail = data[-4000:] if data else ""
+    return proc.returncode, tail
+
+
+def _block_device_mounted(path):
+    import subprocess
+    import json
+    name = os.path.basename(path.rstrip("/"))
+    try:
+        r = subprocess.run(
+            ["lsblk", "-J", "-o", "NAME,MOUNTPOINT"],
+            capture_output=True, text=True, timeout=5
+        )
+        if r.returncode != 0:
+            return False
+        data = json.loads(r.stdout)
+    except Exception:
+        return False
+
+    def _check(dev):
+        if dev.get("name") == name and dev.get("mountpoint"):
+            return True
+        for c in dev.get("children", []):
+            if _check(c):
+                return True
+        return False
+
+    return any(_check(dev) for dev in data.get("blockdevices", []))
+
+
+def _source_fits_target(source, target):
+    import subprocess
+    import json
+    tname = os.path.basename(target.rstrip("/"))
+    try:
+        r = subprocess.run(
+            ["qemu-img", "info", "--output=json", source],
+            capture_output=True, text=True, timeout=30
+        )
+        if r.returncode != 0:
+            return True, ""
+        src_size = int(json.loads(r.stdout).get("virtual-size", 0))
+        with open(f"/sys/class/block/{tname}/size") as f:
+            tgt_size = int(f.read().strip()) * 512
+    except Exception:
+        return True, ""
+    if src_size > tgt_size:
+        return False, (
+            f"ソースのサイズ ({src_size // (1024 * 1024)} MB) が"
+            f"ターゲット ({tgt_size // (1024 * 1024)} MB) より大きいため書き込めません"
+        )
+    return True, ""
+
+
+@app.route("/api/image-to-disk/write", methods=["POST"])
+def api_image_to_disk_write():
+    import stat
+    import subprocess
+    data = request.json or {}
+    source = (data.get("source") or "").strip()
+    target = (data.get("target") or "").strip()
+
+    if not source or not target:
+        return jsonify({"error": "ソースとターゲットを指定してください"}), 400
+
+    if not source.lower().endswith((".qcow2", ".img")):
+        return jsonify({"error": "ソースは .qcow2 または .img ファイルを指定してください"}), 400
+    if not os.path.isfile(source):
+        return jsonify({"error": f"ソースファイルが見つかりません: {source}"}), 400
+
+    if not target.startswith("/dev/") or not os.path.exists(target):
+        return jsonify({"error": f"ターゲットが見つかりません: {target}"}), 400
+    try:
+        if not stat.S_ISBLK(os.stat(target).st_mode):
+            return jsonify({"error": f"ターゲットはブロックデバイスではありません: {target}"}), 400
+    except Exception:
+        return jsonify({"error": f"ターゲットの確認に失敗しました: {target}"}), 400
+
+    tname = os.path.basename(target.rstrip("/"))
+    if os.path.exists(f"/sys/class/block/{tname}/partition"):
+        return jsonify({"error": f"パーティションではなくディスク全体を指定してください: {target}"}), 400
+    if _block_device_mounted(target):
+        return jsonify({"error": f"ターゲットはマウント中です。アンマウントしてから実行してください: {target}"}), 400
+
+    fits, size_msg = _source_fits_target(source, target)
+    if not fits:
+        return jsonify({"error": size_msg}), 400
+
+    if source.lower().endswith(".qcow2"):
+        cmd = ["qemu-img", "convert", "-p", "-O", "raw", source, target]
+    else:
+        cmd = ["dd", f"if={source}", f"of={target}", "bs=4M", "conv=fsync", "status=progress"]
+
+    try:
+        rc, output = _cmd_tail_output(cmd, timeout=7200)
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "書き込みがタイムアウトしました"}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    if rc != 0:
+        return jsonify({"error": f"書き込みに失敗しました (exit={rc})", "output": output}), 500
+
+    subprocess.run(["sync"], capture_output=True, timeout=60)
+    return jsonify({"success": True, "output": output})
+
+
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=8090, debug=False)

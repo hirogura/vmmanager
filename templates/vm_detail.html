@@ -581,12 +581,15 @@ function updateDiskSourceWidget(sel, idx) {
         fetch('/api/iso-files').then(r => r.json()).then(isos => {
             const s = container.querySelector('select');
             s.innerHTML = '<option value="">-- ISOを選択 --</option>';
-            isos.forEach(iso => {
+            isos.filter(iso => /\.iso$/i.test(iso.name)).forEach(iso => {
                 const opt = document.createElement('option');
                 opt.value = iso.path;
                 opt.textContent = iso.label;
                 s.appendChild(opt);
             });
+            if (!s.querySelectorAll('option:not(:first-child)').length) {
+                s.innerHTML = '<option value="">ISOファイルがありません</option>';
+            }
         });
     } else {
         target.value = 'vdb';
@@ -768,7 +771,8 @@ function updateDiskNumbers() {
 
 function detachDisk(targetDev, deviceType) {
     const label = deviceType === 'cdrom' ? 'CD-ROM' : 'ディスク';
-    if (!confirm(`${label} '${targetDev}' を削除しますか？`)) return;
+    const note = deviceType === 'cdrom' ? '' : '（ファイル自体は残ります）';
+    if (!confirm(`${label} '${targetDev}' を削除しますか？${note}`)) return;
     fetch(`/api/vm/{{ vm.name }}/action`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -857,8 +861,7 @@ function changeIso(targetDev) {
 
     fetch('/api/iso-files').then(r => r.json()).then(isos => {
         const sel = document.getElementById('iso-change-select');
-        isos.sort((a, b) => a.name.localeCompare(b.name));
-        isos.forEach(iso => {
+        isos.filter(iso => /\.iso$/i.test(iso.name)).sort((a, b) => a.name.localeCompare(b.name)).forEach(iso => {
             const opt = document.createElement('option');
             opt.value = iso.path;
             opt.textContent = iso.label;

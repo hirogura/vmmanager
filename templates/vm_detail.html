@@ -427,6 +427,7 @@ function addNewDisk() {
                 <select name="new_type_${idx}" onchange="updateDiskSourceWidget(this, ${idx})">
                     <option value="file">ファイル (既存)</option>
                     <option value="file_create">ファイル (空のディスク作成)</option>
+                    <option value="usb_file_create">USBメモリ (空のディスク作成)</option>
                     <option value="block">ブロックデバイス</option>
                     <option value="block_lun">ブロックデバイス (LUN)</option>
                     <option value="cdrom">CD-ROM (ISO)</option>
@@ -450,6 +451,7 @@ function addNewDisk() {
                     <option value="virtio">virtio</option>
                     <option value="sata">SATA</option>
                     <option value="scsi">SCSI</option>
+                    <option value="usb">USB</option>
                 </select>
             </div>
             <div class="form-group">
@@ -477,7 +479,7 @@ function confirmAddDisk(idx) {
     const targetBus = document.querySelector(`[name="new_bus_${idx}"]`).value;
     const driverType = document.querySelector(`[name="new_driver_${idx}"]`).value;
 
-    if (dtype === 'file_create') {
+    if (dtype === 'file_create' || dtype === 'usb_file_create') {
         const diskSizeEl = document.querySelector(`[name="new_disk_size_${idx}"]`);
         const diskSize = diskSizeEl ? diskSizeEl.value.trim() : '';
         if (!src) { alert('ファイル名を入力してください'); return; }
@@ -536,6 +538,11 @@ function updateDiskSourceWidget(sel, idx) {
         bus.value = 'virtio';
         driver.value = 'qcow2';
         container.innerHTML = '<label>ファイル名</label><div style="display:flex;gap:4px"><input type="text" name="new_source_' + idx + '" style="flex:2" placeholder="例: newdisk.qcow2"><input type="text" name="new_disk_size_' + idx + '" style="flex:1" placeholder="容量 (例: 50G)"></div><div style="font-size:0.8em;color:var(--text-secondary);margin-top:4px">ストレージプールのパスに作成されます</div>';
+    } else if (sel.value === 'usb_file_create') {
+        target.value = 'sdb';
+        bus.value = 'usb';
+        driver.value = 'qcow2';
+        container.innerHTML = '<label>ファイル名</label><div style="display:flex;gap:4px"><input type="text" name="new_source_' + idx + '" style="flex:2" placeholder="例: usb.qcow2"><input type="text" name="new_disk_size_' + idx + '" style="flex:1" placeholder="容量 (例: 8G)"></div><div style="font-size:0.8em;color:var(--text-secondary);margin-top:4px">USBバスで接続される仮想USBメモリとして作成されます</div>';
     } else if (sel.value === 'block') {
         target.value = 'vdb';
         bus.value = 'virtio';

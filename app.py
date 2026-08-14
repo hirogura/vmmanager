@@ -2493,5 +2493,421 @@ def api_image_to_disk_write():
     return jsonify({"success": True, "output": output})
 
 
+_IMG_MOUNT_DIR = "/opt/vm/mnt-img"
+_IMG_MOUNT_PREFIX = "/opt/vm/mnt-img"
+_IMG_MOUNT_STATE = "/opt/vm/.img-mount-state.json"
+
+
+def _img_mount_state():
+    import json
+    try:
+        with open(_IMG_MOUNT_STATE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _save_img_mount_state(state):
+    import json
+    try:
+        with open(_IMG_MOUNT_STATE, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2)
+    except Exception:
+        pass
+
+
+def _img_mounted(path):
+    real = os.path.realpath(path)
+    try:
+        with open("/proc/mounts", encoding="utf-8") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) > 1 and os.path.realpath(parts[1]) == real:
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def _img_mount_fs_info(path):
+    real = os.path.realpath(path)
+    try:
+        with open("/proc/mounts", encoding="utf-8") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) > 1 and os.path.realpath(parts[1]) == real:
+                    return parts[0], parts[2]
+    except Exception:
+        pass
+    return None, None
+
+
+def _img_mount_points():
+    """Return the list of currently mounted /opt/vm/mnt-img* paths."""
+    mounts = []
+    try:
+        with open("/proc/mounts", encoding="utf-8") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) > 1 and parts[1].startswith(_IMG_MOUNT_PREFIX):
+                    mounts.append(parts[1])
+    except Exception:
+        pass
+    return mounts
+
+
+def _list_partition_devices(base):
+    """Return all partition device paths of base, or [base] if it has no partitions."""
+    import subprocess
+    import time
+    import json
+    name = os.path.basename(base)
+    for _ in range(30):
+        try:
+            r = subprocess.run(
+                ["lsblk", "-J", "-o", "NAME,TYPE"],
+                capture_output=True, text=True, timeout=5
+            )
+            if r.returncode == 0:
+                data = json.loads(r.stdout)
+                for dev in data.get("blockdevices", []):
+                    if dev.get("name") == name:
+                        parts = [c for c in dev.get("children", [])
+                                 if c.get("type") == "part"]
+                        if parts:
+                            return [f"/dev/{p['name']}" for p in parts]
+                        return [base]
+        except Exception:
+            pass
+        time.sleep(0.5)
+    return [base]
+
+
+def _detach_loops_for_file(path):
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["losetup", "-j", path, "-O", "NAME", "--noheadings"],
+            capture_output=True, text=True, timeout=10
+        )
+        for dev in r.stdout.split():
+            subprocess.run(["losetup", "-d", dev], capture_output=True, text=True, timeout=10)
+    except Exception:
+        pass
+
+
+def _losetup_attach(source):
+    import subprocess
+    import time
+    r = subprocess.run(["losetup", "-f"], capture_output=True, text=True, timeout=10)
+    if r.returncode != 0:
+        return None, (r.stderr or "フリーループデバイスの取得に失敗しました").strip()
+    dev = r.stdout.strip()
+    if not dev.startswith("/dev/"):
+        return None, "フリーループデバイスの取得に失敗しました"
+    r = subprocess.run(["losetup", "-P", dev, source], capture_output=True, text=True, timeout=30)
+    if r.returncode != 0:
+        return None, (r.stderr or f"losetup に失敗しました: {dev}").strip()
+    time.sleep(1)
+    return dev, ""
+
+
+def _nbd_attach(source):
+    import subprocess
+    import time
+    out = []
+    subprocess.run(["modprobe", "nbd", "max_part=16"], capture_output=True, text=True, timeout=5)
+    time.sleep(0.5)
+    for i in range(16):
+        dev = f"/dev/nbd{i}"
+        if not os.path.exists(dev):
+            continue
+        if os.path.exists(f"/sys/block/nbd{i}/pid"):
+            continue
+        r = subprocess.run(["qemu-nbd", "--connect", dev, source],
+                           capture_output=True, text=True, timeout=120)
+        tail = (r.stderr or r.stdout or "").strip()
+        if tail:
+            out.append(f"qemu-nbd: {tail}")
+        if r.returncode == 0:
+            time.sleep(1)
+            return dev, "nbd", "", out
+    return None, None, "qemu-nbd が利用可能な nbd デバイスがありません", out
+
+
+def _img_detach(dev, mode=None):
+    import subprocess
+    if mode is None:
+        mode = "nbd" if os.path.basename(dev).startswith("nbd") else "raw"
+    try:
+        if mode == "nbd":
+            subprocess.run(["qemu-nbd", "--disconnect", dev], capture_output=True, text=True, timeout=10)
+        else:
+            subprocess.run(["losetup", "-d", dev], capture_output=True, text=True, timeout=10)
+    except Exception:
+        pass
+
+
+def _base_of_device(part_dev):
+    """Derive the base block device (e.g. /dev/nbd0 from /dev/nbd0p1)."""
+    import subprocess
+    try:
+        r = subprocess.run(["lsblk", "-no", "PKNAME", part_dev],
+                           capture_output=True, text=True, timeout=5)
+        pk = r.stdout.strip()
+        if pk:
+            return f"/dev/{pk}"
+    except Exception:
+        pass
+    return None
+
+
+@app.route("/tools/image-to-mount")
+def image_to_mount():
+    return render_template("image_to_mount.html")
+
+
+@app.route("/api/image-to-mount/status")
+def api_image_to_mount_status():
+    state = _img_mount_state() or {}
+    mounts = []
+    for m in (state.get("mounts") or []):
+        mp = m.get("mountpoint")
+        if not mp:
+            continue
+        mounted = _img_mounted(mp)
+        mount_source = ""
+        fs_type = ""
+        if mounted:
+            mount_source, fs_type = _img_mount_fs_info(mp)
+        mounts.append({
+            "partition": m.get("partition"),
+            "mountpoint": mp,
+            "mounted": mounted,
+            "device": mount_source,
+            "fs_type": fs_type,
+        })
+    mounted_any = any(m["mounted"] for m in mounts)
+    first = mounts[0] if mounts else {}
+    return jsonify({
+        "mounted": mounted_any,
+        "mounts": mounts,
+        "source": state.get("source"),
+        "device": first.get("device") or state.get("device"),
+        "base_device": state.get("base_device"),
+        "mountpoint": first.get("mountpoint"),
+        "fs_type": first.get("fs_type"),
+        "mode": state.get("mode"),
+    })
+
+
+@app.route("/api/image-to-mount/mount", methods=["POST"])
+def api_image_to_mount_mount():
+    import subprocess
+    import tempfile
+    data = request.json or {}
+    source = (data.get("source") or "").strip()
+
+    if not source:
+        return jsonify({"error": "ソースを指定してください"}), 400
+    if not source.lower().endswith((".qcow2", ".img")):
+        return jsonify({"error": "ソースは .qcow2 または .img ファイルを指定してください"}), 400
+    if not os.path.isfile(source):
+        return jsonify({"error": f"ソースファイルが見つかりません: {source}"}), 400
+    if _img_mount_state():
+        return jsonify({"error": "すでにイメージがマウントされています。先にアンマウントしてください。"}), 400
+    if _img_mount_points():
+        return jsonify({"error": "既に /opt/vm/mnt-img* がマウント中です。先にアンマウントしてください。"}), 400
+
+    os.makedirs(_IMG_MOUNT_DIR, exist_ok=True)
+
+    _detach_loops_for_file(source)
+    output = []
+    mode = ""
+    base_dev = None
+    temp_raw = None
+    try:
+        if source.lower().endswith(".qcow2"):
+            base_dev, mode, err, nbd_out = _nbd_attach(source)
+            output += nbd_out
+            if base_dev is None:
+                temp_raw = os.path.join(
+                    tempfile.gettempdir(),
+                    "vm-mnt-" + os.path.basename(source) + ".raw"
+                )
+                output.append("qemu-nbd が利用できないため qemu-img convert で raw に変換します")
+                rc, tail = _cmd_tail_output(
+                    ["qemu-img", "convert", "-O", "raw", source, temp_raw],
+                    timeout=7200
+                )
+                output.append((tail or "").strip())
+                if rc != 0:
+                    return jsonify({
+                        "error": "raw への変換に失敗しました",
+                        "output": "\n".join(output)
+                    }), 500
+                base_dev, err = _losetup_attach(temp_raw)
+                if base_dev is None:
+                    return jsonify({
+                        "error": err or "ループデバイスの接続に失敗しました",
+                        "output": "\n".join(output)
+                    }), 500
+                mode = "raw"
+        else:
+            base_dev, err = _losetup_attach(source)
+            if base_dev is None:
+                return jsonify({
+                    "error": err or "ループデバイスの接続に失敗しました",
+                    "output": "\n".join(output)
+                }), 500
+            mode = "raw"
+
+        part_devs = _list_partition_devices(base_dev)
+        output.append("検出パーティション: " + (", ".join(part_devs) if len(part_devs) > 1 else part_devs[0]))
+
+        mounts = []
+        mount_failures = []
+        for i, part_dev in enumerate(part_devs):
+            mountpoint = _IMG_MOUNT_DIR if i == 0 else f"{_IMG_MOUNT_DIR}{i + 1}"
+            os.makedirs(mountpoint, exist_ok=True)
+            r = subprocess.run(["mount", part_dev, mountpoint],
+                               capture_output=True, text=True, timeout=30)
+            if r.returncode != 0:
+                msg = f"{part_dev} → {mountpoint}: {r.stderr.strip()}"
+                mount_failures.append(msg)
+                output.append(f"マウント失敗: {msg}")
+                continue
+            mounts.append({"partition": part_dev, "mountpoint": mountpoint})
+            output.append(f"マウント: {part_dev} → {mountpoint}")
+
+        if not mounts:
+            _img_detach(base_dev, mode)
+            if temp_raw:
+                try:
+                    os.remove(temp_raw)
+                except Exception:
+                    pass
+            return jsonify({
+                "error": f"マウントできるパーティションがありませんでした。 {mount_failures[0] if mount_failures else ''}",
+                "output": "\n".join(output)
+            }), 500
+
+        _save_img_mount_state({
+            "source": source,
+            "mounts": mounts,
+            "base_device": base_dev,
+            "mode": mode,
+            "temp_raw": temp_raw,
+        })
+        output.append(f"{len(mounts)} 個のパーティションをマウントしました")
+        return jsonify({
+            "success": True,
+            "mounts": mounts,
+            "mount_count": len(mounts),
+            "output": "\n".join(output),
+        })
+    except Exception as e:
+        return jsonify({"error": str(e), "output": "\n".join(output)}), 500
+
+
+def _busy_blockers(mountpoint):
+    """Return a human-readable list of processes using the mountpoint."""
+    import subprocess
+    try:
+        r = subprocess.run(["fuser", "-vm", mountpoint], capture_output=True, text=True, timeout=10)
+        out = (r.stderr or r.stdout or "").strip()
+        lines = [ln.strip() for ln in out.splitlines() if ln.strip() and "PID" not in ln]
+        if lines:
+            return "\n".join(lines)
+    except Exception:
+        pass
+    try:
+        r = subprocess.run(["lsof", "+D", mountpoint], capture_output=True, text=True, timeout=10)
+        out = (r.stdout or "").strip()
+        if out:
+            return "\n".join(out.splitlines()[:10])
+    except Exception:
+        pass
+    return ""
+
+
+@app.route("/api/image-to-mount/unmount", methods=["POST"])
+def api_image_to_mount_unmount():
+    import subprocess
+    import time
+    output = []
+    errors = []
+    state = _img_mount_state() or {}
+
+    mounts = state.get("mounts") or []
+    if not mounts and state.get("device"):
+        mounts = [{"partition": state.get("device"), "mountpoint": _IMG_MOUNT_DIR}]
+
+    if not mounts:
+        live = _img_mount_points()
+        if live:
+            for mp in live:
+                src = ""
+                if _img_mounted(mp):
+                    src, _ = _img_mount_fs_info(mp)
+                mounts.append({"partition": src or None, "mountpoint": mp})
+
+    subprocess.run(["sync"], capture_output=True, timeout=60)
+
+    for m in reversed(mounts):
+        mp = m.get("mountpoint")
+        if not mp:
+            continue
+        if _img_mounted(mp):
+            r = None
+            for _ in range(3):
+                r = subprocess.run(["umount", mp], capture_output=True, text=True, timeout=30)
+                if r.returncode == 0 or "busy" not in r.stderr.lower():
+                    break
+                time.sleep(1)
+            if r.returncode != 0:
+                blockers = _busy_blockers(mp)
+                hint = ""
+                if blockers:
+                    hint = "\n使用中のプロセス: " + blockers
+                errors.append(f"アンマウントに失敗しました: {mp}{hint}")
+            else:
+                output.append(f"アンマウントしました: {mp}")
+        else:
+            output.append(f"マウントされていません: {mp}")
+
+    base_dev = state.get("base_device")
+    if not base_dev:
+        for m in mounts:
+            part = m.get("partition")
+            if part:
+                base_dev = _base_of_device(part)
+                if base_dev:
+                    break
+    if base_dev:
+        _img_detach(base_dev, state.get("mode"))
+        output.append(f"デバイスを切断しました: {base_dev}")
+
+    temp_raw = state.get("temp_raw")
+    if temp_raw and os.path.isfile(temp_raw):
+        try:
+            os.remove(temp_raw)
+            output.append(f"一時ファイルを削除しました: {temp_raw}")
+        except Exception as e:
+            errors.append(f"一時ファイルの削除に失敗: {e}")
+
+    if os.path.isfile(_IMG_MOUNT_STATE):
+        try:
+            os.remove(_IMG_MOUNT_STATE)
+        except Exception:
+            pass
+
+    if errors:
+        return jsonify({"error": "; ".join(errors), "output": "\n".join(output)}), 500
+    if not output:
+        output.append("アンマウント完了")
+    return jsonify({"success": True, "output": "\n".join(output)})
+
+
 if __name__ == "__main__":
     app.run(host="127.0.0.1", port=8090, debug=False)

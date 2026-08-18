@@ -226,7 +226,7 @@
     <div class="card-header">
         <h2><i class="fas fa-network-wired"></i> ネットワーク</h2>
     </div>
-    <div class="form-row" style="grid-template-columns:1fr 1fr 1fr">
+    <div class="form-row" style="grid-template-columns:1fr 1fr 1fr 1fr">
         <div class="form-group">
             <label>タイプ</label>
             <select name="net_type" {% if is_active %}disabled{% endif %}>
@@ -263,6 +263,10 @@
                 {% endif %}
                 {% endfor %}
             </select>
+        </div>
+        <div class="form-group">
+            <label>MACアドレス</label>
+            <input type="text" name="net_mac" value="{{ devices.networks[0].mac if devices.networks else '' }}" placeholder="52:54:00:xx:xx:xx" {% if is_active %}disabled{% endif %} style="width:100%">
         </div>
     </div>
 </div>
@@ -667,6 +671,7 @@ async function collectFormData() {
         net_type: fd.get('net_type'),
         net_source: fd.get('net_source'),
         net_model: fd.get('net_model'),
+        net_mac: fd.get('net_mac'),
         boot_order: bootOrder,
         disk_order: [...document.querySelectorAll('#disk-list tr')].map(tr => ({target: tr.dataset.target, device: tr.dataset.device})),
         existing_disks: [

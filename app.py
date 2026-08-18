@@ -376,6 +376,17 @@ def vm_edit(name):
         return jsonify({"error": "VMを停止してから編集してください"}), 400
 
     config["uuid"] = dom.UUIDString()
+
+    # 既存のNICのMACを引き継ぐ（クライアントから送られなかった場合の保険）
+    if not config.get("net_mac"):
+        try:
+            cur_root = ET.fromstring(dom.XMLDesc(0))
+            mac_el = cur_root.find(".//interface/mac")
+            if mac_el is not None:
+                config["net_mac"] = mac_el.get("address", "")
+        except Exception:
+            pass
+
     new_xml = _build_edit_xml(config)
     if new_xml is None:
         conn.close()
@@ -453,6 +464,7 @@ def _build_edit_xml(config):
     net_type = config.get("net_type", "network")
     net_source = config.get("net_source", "default")
     net_model = config.get("net_model", "virtio")
+    net_mac = (config.get("net_mac") or "").strip()
 
     existing_disks = config.get("existing_disks", [])
     disk_order = config.get("disk_order", [])
@@ -628,6 +640,8 @@ def _build_edit_xml(config):
         lines.append("    </graphics>")
 
     lines.append(f"    <interface type='{net_type}'>")
+    if net_mac:
+        lines.append(f"      <mac address='{net_mac}'/>")
     if net_type == "network":
         lines.append(f"      <source network='{net_source}'/>")
     elif net_type == "bridge":
@@ -1383,6 +1397,7 @@ def _build_vm_xml(config):
     net_type = config.get("net_type", "network")
     net_source = config.get("net_source", "default")
     net_model = config.get("net_model", "virtio")
+    net_mac = (config.get("net_mac") or "").strip()
 
     vnc_port = config.get("vnc_port", "") or "-1"
     try:
@@ -1597,6 +1612,8 @@ def _build_vm_xml(config):
         lines.append("    </graphics>")
 
     lines.append(f"    <interface type='{net_type}'>")
+    if net_mac:
+        lines.append(f"      <mac address='{net_mac}'/>")
     if net_type == "network":
         lines.append(f"      <source network='{net_source}'/>")
     elif net_type == "bridge":

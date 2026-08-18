@@ -64,6 +64,11 @@
             {% endfor %}
         </select>
     </div>
+    <div class="form-group">
+        <label>MACアドレス（任意）</label>
+        <input type="text" name="net_mac" placeholder="52:54:00:xx:xx:xx" style="flex:1;min-width:200px">
+        <p style="color:var(--text-muted);font-size:11px;margin-top:4px">未指定なら自動生成。インストール済みディスクを流用する場合は、元のVMのMACを指定してください（ゲストのネットワーク設定がMACに紐づいているため）。</p>
+    </div>
     <div style="display:flex;gap:16px;flex-wrap:wrap">
         <div class="checkbox-group">
             <input type="checkbox" name="uefi" id="uefi" checked onchange="document.getElementById('secureboot-group').style.display=this.checked?'flex':'none'">
@@ -182,7 +187,8 @@ function collectFormData() {
         disk_bus: f.elements['disk_bus'].value,
         existing_disk_path: f.elements['existing_disk_path'] ? f.elements['existing_disk_path'].value : '',
         tpm_enabled: f.elements['tpm_enabled'].checked,
-        hyperv_enabled: f.elements['hyperv_enabled'].checked
+        hyperv_enabled: f.elements['hyperv_enabled'].checked,
+        net_mac: f.elements['net_mac'].value.trim()
     };
 }
 

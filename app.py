@@ -1091,12 +1091,12 @@ def vm_action(name):
                     import subprocess
                     if new_source:
                         r = subprocess.run(
-                            ["sudo", "virsh", "change-media", name, target_dev, "--source", new_source],
+                            ["sudo", "virsh", "change-media", name, target_dev, "--source", new_source, "--live", "--config"],
                             capture_output=True, text=True, timeout=10
                         )
                     else:
                         r = subprocess.run(
-                            ["sudo", "virsh", "change-media", name, target_dev, "--eject"],
+                            ["sudo", "virsh", "change-media", name, target_dev, "--eject", "--live", "--config"],
                             capture_output=True, text=True, timeout=10
                         )
                     if r.returncode != 0:

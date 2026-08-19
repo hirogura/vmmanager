@@ -16,10 +16,10 @@ libvirt / QEMU 上の仮想マシンを Web ブラウザから管理するため
 インストールスクリプトを GitHub からダウンロードして、root で実行します。
 
 ```bash
-cd ~
-curl -fsSL https://raw.githubusercontent.com/hirogura/vmmanager/main/install-vmmanager1.sh -o install-vmmanager1.sh
-chmod +x install-vmmanager1.sh
-sudo ./install-vmmanager1.sh
+curl -fsSL -o /tmp/install-vmmanager1.sh \
+  https://raw.githubusercontent.com/hirogura/vmmanager/main/install-vmmanager1.sh
+chmod +x /tmp/install-vmmanager1.sh
+sudo /tmp/install-vmmanager1.sh
 ```
 
 ### インストールスクリプトが行うこと

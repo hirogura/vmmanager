@@ -2211,6 +2211,48 @@ def api_vm_status(name):
     return jsonify({"active": is_active})
 
 
+@app.route("/api/vm/<name>/ip")
+def api_vm_ip(name):
+    conn = get_conn()
+    try:
+        dom = conn.lookupByName(name)
+    except libvirt.libvirtError:
+        conn.close()
+        return jsonify({"error": f"VM '{name}' が見つかりません"}), 404
+    if not dom.isActive():
+        conn.close()
+        return jsonify({"interfaces": []})
+    try:
+        import subprocess
+        r = subprocess.run(
+            ["sudo", "virsh", "domifaddr", name],
+            capture_output=True, text=True, timeout=10
+        )
+        interfaces = []
+        if r.returncode == 0:
+            lines = r.stdout.strip().split("\n")
+            if len(lines) > 1:
+                headers = lines[0].split()
+                for line in lines[1:]:
+                    parts = line.split()
+                    if len(parts) >= 4:
+                        iface = {
+                            "name": parts[0],
+                            "type": parts[1],
+                            "mac": parts[2],
+                            "ip": parts[3],
+                        }
+                        if len(parts) >= 5:
+                            iface["ip"] = parts[3]
+                            iface["prefix"] = parts[4]
+                        interfaces.append(iface)
+        conn.close()
+        return jsonify({"interfaces": interfaces})
+    except (subprocess.TimeoutExpired, Exception) as e:
+        conn.close()
+        return jsonify({"interfaces": [], "error": str(e)})
+
+
 @app.route("/api/vm/<name>/console-proxy", methods=["POST", "DELETE"])
 def console_proxy(name):
     if request.method == "DELETE":

@@ -269,6 +269,11 @@
             <input type="text" name="net_mac" value="{{ devices.networks[0].mac if devices.networks else '' }}" placeholder="52:54:00:xx:xx:xx" {% if is_active %}disabled{% endif %} style="width:100%">
         </div>
     </div>
+    {% if is_active %}
+    <div id="vm-ip-section" style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border);font-size:12px;color:var(--text-muted);display:flex;gap:16px;flex-wrap:wrap">
+        <span><i class="fas fa-info-circle"></i> IPアドレス: <span id="vm-ip-list" style="font-family:monospace;color:var(--text)">読み込み中...</span></span>
+    </div>
+    {% endif %}
 </div>
 
 <div class="card">
@@ -1028,7 +1033,24 @@ function loadUsbDevices() {
 document.addEventListener('DOMContentLoaded', function() {
     loadUsbDevices();
     loadSnapshots();
+    loadVmIp();
 });
+
+function loadVmIp() {
+    const el = document.getElementById('vm-ip-list');
+    if (!el) return;
+    fetch(`/api/vm/{{ vm.name }}/ip`).then(r => r.json()).then(data => {
+        if (!data.interfaces || !data.interfaces.length) {
+            el.innerHTML = '<span style="color:var(--text-muted)">取得できません</span>';
+            return;
+        }
+        el.innerHTML = data.interfaces.map(i =>
+            `<span style="margin-right:12px">${i.name}: ${i.ip}${i.prefix ? '/' + i.prefix : ''}</span>`
+        ).join('');
+    }).catch(() => {
+        el.innerHTML = '<span style="color:var(--text-muted)">取得できません</span>';
+    });
+}
 
 function loadSnapshots() {
     fetch(`/api/vm/{{ vm.name }}/snapshots`).then(r => r.json()).then(snaps => {

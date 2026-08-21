@@ -39,4 +39,45 @@ document.addEventListener('DOMContentLoaded', function() {
             }, 3000);
         });
     }
+
+    const btnUpdate = document.getElementById('btn-server-update');
+    if (btnUpdate) {
+        btnUpdate.addEventListener('click', function() {
+            if (!confirm('VM Managerを最新版にアップデートしますか？\n完了後、「サーバ再起動」ボタンを押して反映してください。')) return;
+            const original = btnUpdate.innerHTML;
+            btnUpdate.disabled = true;
+            btnUpdate.innerHTML = '<i class="fas fa-spinner fa-spin"></i> アップデート中...';
+            fetch('/api/server/update', { method: 'POST' })
+                .then(r => r.json().then(d => ({ ok: r.ok, data: d })))
+                .then(({ ok, data }) => {
+                    if (!ok) {
+                        alert('エラー: ' + (data.error || 'アップデートを開始できませんでした'));
+                        btnUpdate.disabled = false;
+                        btnUpdate.innerHTML = original;
+                        return;
+                    }
+                    const poll = setInterval(async () => {
+                        try {
+                            const res = await fetch('/api/server/update/status', { cache: 'no-store' });
+                            const st = await res.json();
+                            if (!st.running) {
+                                clearInterval(poll);
+                                btnUpdate.disabled = false;
+                                btnUpdate.innerHTML = original;
+                                if (st.success) {
+                                    alert('アップデートが完了しました。「サーバ再起動」ボタンを押してください。');
+                                } else {
+                                    alert('アップデートに失敗しました:\n' + (st.log || '詳細不明'));
+                                }
+                            }
+                        } catch (e) {}
+                    }, 3000);
+                })
+                .catch(() => {
+                    alert('エラー: アップデートを開始できませんでした');
+                    btnUpdate.disabled = false;
+                    btnUpdate.innerHTML = original;
+                });
+        });
+    }
 });

@@ -2,6 +2,7 @@
 import libvirt
 import os
 import socket
+import threading
 import time
 from xml.etree import ElementTree as ET
 from flask import Flask, render_template, request, jsonify, redirect, url_for, flash
@@ -2304,6 +2305,62 @@ def server_restart():
 
     threading.Thread(target=_restart, daemon=True).start()
     return jsonify({"success": True})
+
+
+_update_state = {"running": False, "success": None, "log": ""}
+_update_lock = threading.Lock()
+
+
+@app.route("/api/server/update", methods=["POST"])
+def server_update():
+    import subprocess
+
+    with _update_lock:
+        if _update_state["running"]:
+            return jsonify({"error": "アップデートが既に実行中です"}), 409
+        _update_state.update(running=True, success=None, log="")
+
+    def _update():
+        import os
+        import tempfile
+
+        fd, script_path = tempfile.mkstemp(prefix="install-vmmanager-", suffix=".sh")
+        try:
+            dl = subprocess.run(
+                ["curl", "-fsSL", "-o", script_path,
+                 "https://raw.githubusercontent.com/hirogura/vmmanager/main/install-vmmanager1.sh"],
+                capture_output=True, text=True, timeout=120,
+            )
+            if dl.returncode != 0:
+                _update_state["success"] = False
+                _update_state["log"] = "スクリプトのダウンロードに失敗しました\n" + ((dl.stderr or "").strip())
+                return
+
+            os.chmod(script_path, 0o755)
+            r = subprocess.run(
+                ["sudo", "bash", script_path],
+                capture_output=True, text=True, timeout=3600,
+            )
+            log = ((r.stdout or "") + "\n" + (r.stderr or "")).strip()
+            _update_state["log"] = log[-5000:]
+            _update_state["success"] = r.returncode == 0
+        except Exception as e:
+            _update_state["success"] = False
+            _update_state["log"] = str(e)
+        finally:
+            try:
+                os.remove(script_path)
+            except OSError:
+                pass
+            _update_state["running"] = False
+
+    threading.Thread(target=_update, daemon=True).start()
+    return jsonify({"success": True})
+
+
+@app.route("/api/server/update/status")
+def server_update_status():
+    return jsonify(_update_state)
 
 
 @app.route("/tools/image-to-disk")

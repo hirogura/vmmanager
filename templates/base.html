@@ -20,6 +20,7 @@
         <ul class="sidebar-menu">
             <li><a href="/vm/create" class="{% if request.endpoint == 'vm_create' %}active{% endif %}"><i class="fas fa-plus-circle"></i> 新規作成</a></li>
             <li><button type="button" id="btn-server-restart" class="sidebar-btn"><i class="fas fa-sync-alt"></i> サーバ再起動</button></li>
+            <li><button type="button" id="btn-server-update" class="sidebar-btn"><i class="fas fa-cloud-download-alt"></i> サーバアップデート</button></li>
             <li><a href="/tools/upload" class="{% if request.path == '/tools/upload' %}active{% endif %}"><i class="fas fa-upload"></i> ISOアップロード</a></li>
             <li><a href="/tools/image-to-disk" class="{% if request.path == '/tools/image-to-disk' %}active{% endif %}"><i class="fas fa-hdd"></i> イメージ→ディスク</a></li>
             <li><a href="/tools/image-to-mount" class="{% if request.path == '/tools/image-to-mount' %}active{% endif %}"><i class="fas fa-box-open"></i> イメージ→マウント</a></li>
@@ -47,7 +48,7 @@
         {% endwith %}
         {% block content %}{% endblock %}
     </main>
-    <script src="{{ url_for('static', filename='js/app.js') }}?v=24"></script>
+    <script src="{{ url_for('static', filename='js/app.js') }}?v=25"></script>
     {% block scripts %}{% endblock %}
 </body>
 </html>

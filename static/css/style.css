@@ -60,6 +60,10 @@ body {
     color: var(--text-primary);
 }
 
+.sidebar-header {
+    text-decoration: none;
+}
+
 .sidebar-header i { color: var(--accent); font-size: 14px; }
 
 .sidebar-header .version {

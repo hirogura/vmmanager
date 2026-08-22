@@ -31,16 +31,36 @@
     </div>
 </div>
 
-<div class="card">
+<div class="card" style="margin-bottom:16px">
     <div class="card-header">
         <h2><i class="fas fa-list"></i> 既存ファイル</h2>
     </div>
     <div id="file-list"><p style="color:var(--text-muted);font-size:11px">読み込み中...</p></div>
 </div>
+
+<div class="card">
+    <div class="card-header">
+        <h2><i class="fas fa-cloud-download-alt"></i> WebからISOダウンロード</h2>
+    </div>
+    <p style="color:var(--text-muted);font-size:11px;margin-bottom:8px">
+        ISOイメージの直接URLを入力してダウンロードします。保存先: <code>{{ pool_dir }}</code>
+    </p>
+    <div class="form-group">
+        <label>ISOイメージの直接URL</label>
+        <input type="text" id="dl-url" placeholder="https://example.com/path/to/image.iso" style="width:100%">
+    </div>
+    <div id="dl-status" style="font-size:12px;color:var(--text-secondary);margin-bottom:8px"></div>
+    <div class="btn-group">
+        <button type="button" id="btn-download" class="btn btn-primary"><i class="fas fa-download"></i> Webからダウンロード</button>
+        <button type="button" id="btn-dl-reload" class="btn btn-secondary"><i class="fas fa-sync"></i> 再読み込み</button>
+    </div>
+</div>
 {% endblock %}
 {% block scripts %}
 <script>
 let existingNames = [];
+const ALLOWED_EXTS = ['.iso', '.qcow2', '.img'];
+let dlPollTimer = null;
 
 function fmtSize(bytes) {
     if (bytes >= 1024 * 1024 * 1024) return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
@@ -53,13 +73,16 @@ function loadFiles() {
         .then(r => r.json())
         .then(vols => {
             existingNames = vols.map(v => v.name);
+            const filtered = vols.filter(v =>
+                ALLOWED_EXTS.some(ext => v.name.toLowerCase().endsWith(ext))
+            );
             const list = document.getElementById('file-list');
             list.innerHTML = '';
-            if (!vols.length) {
+            if (!filtered.length) {
                 list.innerHTML = '<p style="color:var(--text-muted);font-size:11px">ファイルがありません</p>';
                 return;
             }
-            vols.slice().sort((a, b) => b.name.localeCompare(a.name)).forEach(v => {
+            filtered.slice().sort((a, b) => b.name.localeCompare(a.name)).forEach(v => {
                 const row = document.createElement('div');
                 row.style.cssText = 'display:flex;justify-content:space-between;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--border)';
                 const nameSpan = document.createElement('span');
@@ -179,6 +202,61 @@ document.getElementById('btn-upload').addEventListener('click', function() {
     xhr.send(fd);
 });
 
+function pollDlStatus() {
+    fetch('/api/download-iso/status')
+        .then(r => r.json())
+        .then(s => {
+            const el = document.getElementById('dl-status');
+            if (s.running) {
+                el.textContent = 'ダウンロード中: ' + s.filename + ' (' + fmtSize((s.size_mb || 0) * 1024 * 1024) + ')';
+                return;
+            }
+            clearInterval(dlPollTimer);
+            dlPollTimer = null;
+            const btn = document.getElementById('btn-download');
+            btn.disabled = false;
+            if (s.success === null) return;
+            if (s.success) {
+                el.textContent = 'ダウンロード完了: ' + s.filename + ' (' + fmtSize((s.size_mb || 0) * 1024 * 1024) + ')';
+                loadFiles();
+            } else {
+                el.textContent = 'ダウンロード失敗: ' + (s.log || '不明なエラー');
+                loadFiles();
+            }
+        })
+        .catch(() => {});
+}
+
+document.getElementById('btn-download').addEventListener('click', function() {
+    const url = document.getElementById('dl-url').value.trim();
+    if (!url) {
+        alert('URLを入力してください');
+        return;
+    }
+    fetch('/api/download-iso', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({url: url})
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) {
+            alert('エラー: ' + data.error);
+            return;
+        }
+        document.getElementById('dl-status').textContent = 'ダウンロード開始: ' + data.filename;
+        this.disabled = true;
+        dlPollTimer = setInterval(pollDlStatus, 1000);
+    })
+    .catch(err => alert('通信エラー: ' + err));
+});
+
+document.getElementById('btn-dl-reload').addEventListener('click', function() {
+    loadFiles();
+    pollDlStatus();
+});
+
 loadFiles();
+pollDlStatus();
 </script>
 {% endblock %}

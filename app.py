@@ -2625,6 +2625,71 @@ def api_upload_delete():
     return jsonify({"success": True})
 
 
+_download_state = {"running": False, "success": None, "log": "", "filename": "", "path": ""}
+_download_lock = threading.Lock()
+
+
+@app.route("/api/download-iso", methods=["POST"])
+def api_download_iso():
+    import subprocess
+    from urllib.parse import urlparse
+
+    data = request.json or {}
+    url = (data.get("url") or "").strip()
+    if not url:
+        return jsonify({"error": "URLを入力してください"}), 400
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return jsonify({"error": "http:// または https:// で始まるURLを指定してください"}), 400
+
+    filename = secure_filename(os.path.basename(urlparse(url).path))
+    if not filename:
+        return jsonify({"error": "URLからファイル名を取得できませんでした"}), 400
+
+    pool_dir = _default_pool_dir()
+    dest = os.path.join(pool_dir, filename)
+    if os.path.exists(dest):
+        return jsonify({"error": f"同名のファイルが既に存在します: {filename}"}), 400
+
+    with _download_lock:
+        if _download_state["running"]:
+            return jsonify({"error": "ダウンロードが既に実行中です"}), 409
+        _download_state.update(running=True, success=None, log="", filename=filename, path=dest)
+
+    def _download():
+        try:
+            r = subprocess.run(
+                ["wget", "-O", dest, url],
+                capture_output=True, text=True,
+            )
+            with _download_lock:
+                _download_state["success"] = r.returncode == 0
+                _download_state["log"] = ((r.stderr or "") + "\n" + (r.stdout or "")).strip()[-5000:]
+                if r.returncode != 0:
+                    try:
+                        os.remove(dest)
+                    except OSError:
+                        pass
+        except Exception as e:
+            with _download_lock:
+                _download_state["success"] = False
+                _download_state["log"] = str(e)
+        finally:
+            _download_state["running"] = False
+
+    threading.Thread(target=_download, daemon=True).start()
+    return jsonify({"success": True, "filename": filename})
+
+
+@app.route("/api/download-iso/status")
+def api_download_iso_status():
+    state = dict(_download_state)
+    try:
+        state["size_mb"] = os.path.getsize(state["path"]) // (1024 * 1024) if os.path.isfile(state["path"]) else 0
+    except Exception:
+        state["size_mb"] = 0
+    return jsonify(state)
+
+
 def _cmd_tail_output(cmd, timeout):
     import subprocess
     import tempfile

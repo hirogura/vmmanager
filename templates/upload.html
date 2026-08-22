@@ -52,6 +52,7 @@
     <div id="dl-status" style="font-size:12px;color:var(--text-secondary);margin-bottom:8px"></div>
     <div class="btn-group">
         <button type="button" id="btn-download" class="btn btn-primary"><i class="fas fa-download"></i> Webからダウンロード</button>
+        <button type="button" id="btn-dl-cancel" class="btn btn-secondary" disabled><i class="fas fa-stop"></i> キャンセル</button>
         <button type="button" id="btn-dl-reload" class="btn btn-secondary"><i class="fas fa-sync"></i> 再読み込み</button>
     </div>
 </div>
@@ -207,6 +208,7 @@ function pollDlStatus() {
         .then(r => r.json())
         .then(s => {
             const el = document.getElementById('dl-status');
+            document.getElementById('btn-dl-cancel').disabled = !s.running;
             if (s.running) {
                 el.textContent = 'ダウンロード中: ' + s.filename + ' (' + fmtSize((s.size_mb || 0) * 1024 * 1024) + ')';
                 return;
@@ -219,6 +221,8 @@ function pollDlStatus() {
             if (s.success) {
                 el.textContent = 'ダウンロード完了: ' + s.filename + ' (' + fmtSize((s.size_mb || 0) * 1024 * 1024) + ')';
                 loadFiles();
+            } else if (s.cancelled) {
+                el.textContent = 'ダウンロードをキャンセルしました';
             } else {
                 el.textContent = 'ダウンロード失敗: ' + (s.log || '不明なエラー');
                 loadFiles();
@@ -246,9 +250,29 @@ document.getElementById('btn-download').addEventListener('click', function() {
         }
         document.getElementById('dl-status').textContent = 'ダウンロード開始: ' + data.filename;
         this.disabled = true;
+        document.getElementById('btn-dl-cancel').disabled = false;
         dlPollTimer = setInterval(pollDlStatus, 1000);
     })
     .catch(err => alert('通信エラー: ' + err));
+});
+
+document.getElementById('btn-dl-cancel').addEventListener('click', function() {
+    if (!confirm('ダウンロードをキャンセルしますか？')) return;
+    this.disabled = true;
+    fetch('/api/download-iso/cancel', {method: 'POST'})
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) {
+            alert('エラー: ' + data.error);
+            pollDlStatus();
+            return;
+        }
+        document.getElementById('dl-status').textContent = 'キャンセル中...';
+    })
+    .catch(err => {
+        alert('通信エラー: ' + err);
+        pollDlStatus();
+    });
 });
 
 document.getElementById('btn-dl-reload').addEventListener('click', function() {

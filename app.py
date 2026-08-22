@@ -2625,12 +2625,14 @@ def api_upload_delete():
     return jsonify({"success": True})
 
 
-_download_state = {"running": False, "success": None, "log": "", "filename": "", "path": ""}
+_download_state = {"running": False, "success": None, "log": "", "filename": "", "path": "", "cancelled": False}
 _download_lock = threading.Lock()
+_download_proc = None
 
 
 @app.route("/api/download-iso", methods=["POST"])
 def api_download_iso():
+    global _download_proc
     import subprocess
     from urllib.parse import urlparse
 
@@ -2653,18 +2655,20 @@ def api_download_iso():
     with _download_lock:
         if _download_state["running"]:
             return jsonify({"error": "ダウンロードが既に実行中です"}), 409
-        _download_state.update(running=True, success=None, log="", filename=filename, path=dest)
+        proc = subprocess.Popen(
+            ["wget", "-O", dest, url],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        _download_proc = proc
+        _download_state.update(running=True, success=None, log="", filename=filename, path=dest, cancelled=False)
 
     def _download():
         try:
-            r = subprocess.run(
-                ["wget", "-O", dest, url],
-                capture_output=True, text=True,
-            )
+            out, err = proc.communicate()
             with _download_lock:
-                _download_state["success"] = r.returncode == 0
-                _download_state["log"] = ((r.stderr or "") + "\n" + (r.stdout or "")).strip()[-5000:]
-                if r.returncode != 0:
+                _download_state["success"] = proc.returncode == 0
+                _download_state["log"] = ((err or "") + "\n" + (out or "")).strip()[-5000:]
+                if proc.returncode != 0:
                     try:
                         os.remove(dest)
                     except OSError:
@@ -2674,10 +2678,35 @@ def api_download_iso():
                 _download_state["success"] = False
                 _download_state["log"] = str(e)
         finally:
-            _download_state["running"] = False
+            with _download_lock:
+                _download_proc = None
+                _download_state["running"] = False
 
     threading.Thread(target=_download, daemon=True).start()
     return jsonify({"success": True, "filename": filename})
+
+
+@app.route("/api/download-iso/cancel", methods=["POST"])
+def api_download_iso_cancel():
+    global _download_proc
+    import subprocess
+
+    with _download_lock:
+        if not _download_state["running"] or _download_proc is None:
+            return jsonify({"error": "ダウンロードは実行中ではありません"}), 400
+        proc = _download_proc
+        _download_state["cancelled"] = True
+
+    try:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+    except Exception as e:
+        return jsonify({"error": f"キャンセルに失敗しました: {e}"}), 500
+    return jsonify({"success": True})
 
 
 @app.route("/api/download-iso/status")

@@ -62,6 +62,12 @@ body {
 
 .sidebar-header i { color: var(--accent); font-size: 14px; }
 
+.sidebar-header .version {
+    font-size: 10px;
+    font-weight: 400;
+    color: var(--text-muted);
+}
+
 .sidebar-menu {
     list-style: none;
     padding: 4px 0;

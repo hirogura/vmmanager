@@ -47,8 +47,28 @@
     <a href="/vm/create" class="btn btn-primary btn-sm" style="margin-top:10px"><i class="fas fa-plus"></i> 新規作成</a>
 </div>
 {% endif %}
+<div class="card ssh-terminal-card">
+    <div class="ssh-terminal-header">
+        <h3 style="margin:0"><i class="fas fa-terminal"></i> SSHターミナル <span id="ssh-status" class="badge badge-info">未接続</span></h3>
+        <span class="spacer"></span>
+        <label>VM:
+            <select id="ssh-vm-select">
+                {% for vm in vms %}{% if vm.state == 'running' %}<option value="{{ vm.name }}">{{ vm.name }}</option>{% endif %}{% endfor %}
+            </select>
+        </label>
+        <label>ユーザー:
+            <input type="text" id="ssh-user" value="root" spellcheck="false">
+        </label>
+        <button class="btn btn-primary btn-sm" id="btn-ssh-connect" onclick="sshConnect()"><i class="fas fa-plug"></i> 接続</button>
+        <button class="btn btn-danger btn-sm" id="btn-ssh-disconnect" onclick="sshDisconnect()" disabled><i class="fas fa-times"></i> 切断</button>
+    </div>
+    <div id="ssh-terminal-container"></div>
+</div>
 {% endblock %}
 {% block scripts %}
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
 <script>
 document.addEventListener('DOMContentLoaded', function() {
     document.querySelectorAll('.vm-ip').forEach(el => {
@@ -67,6 +87,107 @@ document.addEventListener('DOMContentLoaded', function() {
             el.style.fontFamily = '';
         });
     });
+});
+
+let sshTerm = null, sshFit = null, sshWs = null;
+
+function sshSetStatus(text, cls) {
+    const el = document.getElementById('ssh-status');
+    el.textContent = text;
+    el.className = 'badge ' + cls;
+}
+
+function sshCloseSocket(silent) {
+    if (!sshWs) return;
+    if (silent) sshWs.onclose = null;
+    try { sshWs.close(); } catch (e) {}
+    sshWs = null;
+}
+
+function sshResetButtons() {
+    document.getElementById('btn-ssh-connect').disabled = false;
+    document.getElementById('btn-ssh-disconnect').disabled = true;
+}
+
+function sshConnect() {
+    if (typeof Terminal === 'undefined') {
+        alert('xterm.jsの読み込みに失敗しました。ネットワーク接続を確認してください。');
+        return;
+    }
+    const name = document.getElementById('ssh-vm-select').value;
+    if (!name) { alert('稼働中のVMがありません'); return; }
+    const user = document.getElementById('ssh-user').value.trim() || 'root';
+
+    sshCloseSocket(true);
+
+    const container = document.getElementById('ssh-terminal-container');
+    container.innerHTML = '';
+    if (sshTerm) { sshTerm.dispose(); sshTerm = null; }
+
+    sshTerm = new Terminal({
+        cursorBlink: true,
+        fontSize: 13,
+        fontFamily: '"SF Mono", Menlo, Consolas, monospace',
+        theme: {
+            background: '#1a1b26',
+            foreground: '#c0caf5',
+            cursor: '#c0caf5',
+            selectionBackground: '#33467c',
+        },
+    });
+    sshFit = new FitAddon.FitAddon();
+    sshTerm.loadAddon(sshFit);
+    sshTerm.open(container);
+    setTimeout(() => { if (sshFit) sshFit.fit(); }, 50);
+
+    sshTerm.onData(data => {
+        if (sshWs && sshWs.readyState === WebSocket.OPEN) {
+            sshWs.send(JSON.stringify({type: 'input', data}));
+        }
+    });
+    sshTerm.onResize(({cols, rows}) => {
+        if (sshWs && sshWs.readyState === WebSocket.OPEN) {
+            sshWs.send(JSON.stringify({type: 'resize', cols, rows}));
+        }
+    });
+
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    sshWs = new WebSocket(`${proto}://${location.host}/ws/ssh/${encodeURIComponent(name)}?user=${encodeURIComponent(user)}`);
+
+    let gotOutput = false;
+    sshWs.onopen = () => {
+        sshSetStatus('接続中...', 'badge badge-warning');
+        sshWs.send(JSON.stringify({type: 'resize', cols: sshTerm.cols, rows: sshTerm.rows}));
+        sshTerm.focus();
+    };
+    sshWs.onmessage = e => {
+        if (!gotOutput) {
+            gotOutput = true;
+            sshSetStatus('接続済み', 'badge badge-success');
+        }
+        sshTerm.write(e.data);
+    };
+    sshWs.onclose = () => {
+        sshWs = null;
+        sshSetStatus('切断', 'badge badge-danger');
+        if (sshTerm) sshTerm.writeln('\r\n\x1b[31m[接続が閉じました]\x1b[0m');
+        sshResetButtons();
+    };
+
+    document.getElementById('btn-ssh-connect').disabled = true;
+    document.getElementById('btn-ssh-disconnect').disabled = false;
+    sshSetStatus('接続中...', 'badge badge-warning');
+}
+
+function sshDisconnect() {
+    sshCloseSocket(false);
+    sshSetStatus('切断', 'badge badge-danger');
+    if (sshTerm) sshTerm.writeln('\r\n\x1b[31m[切断しました]\x1b[0m');
+    sshResetButtons();
+}
+
+window.addEventListener('resize', () => {
+    if (sshFit && sshTerm) sshFit.fit();
 });
 
 function vmAction(name, action) {

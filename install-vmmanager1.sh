@@ -108,7 +108,7 @@ chmod +x "${INSTALL_DIR}/venv/bin/python"
 
 echo "[7/9] Flask をインストール中..."
 "${INSTALL_DIR}/venv/bin/pip" install --quiet --upgrade pip
-"${INSTALL_DIR}/venv/bin/pip" install --quiet flask
+"${INSTALL_DIR}/venv/bin/pip" install --quiet flask flask-sock simple-websocket
 
 echo "[8/9] systemd サービスを設定中..."
 cat > "/etc/systemd/system/${SERVICE_NAME}.service" << 'SVCEOF'

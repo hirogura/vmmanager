@@ -591,6 +591,48 @@ tr:hover td { background: rgba(255, 255, 255, 0.02); }
 .badge-danger { background: var(--danger-bg); color: var(--danger); }
 .badge-info { background: var(--info-bg); color: var(--accent); }
 
+/* SSH terminal */
+.ssh-terminal-card { margin-top: 16px; }
+
+.ssh-terminal-header {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.ssh-terminal-header h3 { font-size: 13px; }
+
+.ssh-terminal-header label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.ssh-terminal-header select,
+.ssh-terminal-header input[type="text"] {
+    padding: 5px 8px;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text-primary);
+    font-size: 12px;
+}
+
+.ssh-terminal-header select { max-width: 200px; }
+.ssh-terminal-header input[type="text"] { width: 110px; }
+
+#ssh-terminal-container {
+    background: #1a1b26;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    padding: 6px;
+    min-height: 360px;
+}
+
 /* Pulse animation for unsaved changes */
 .btn-pulse {
     animation: btnPulse 1.5s ease-in-out infinite;

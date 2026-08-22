@@ -6,10 +6,12 @@ import threading
 import time
 from xml.etree import ElementTree as ET
 from flask import Flask, render_template, request, jsonify, redirect, url_for, flash
+from flask_sock import Sock
 from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
+sock = Sock(app)
 app.secret_key = os.urandom(24)
 app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024 * 1024
 
@@ -2294,6 +2296,134 @@ def vm_console(name):
 def novnc_static(filename):
     from flask import send_from_directory
     return send_from_directory("/usr/share/novnc", filename)
+
+
+# ============================================================
+# SSH Terminal (WebSocket + PTY)
+# ============================================================
+def _vm_ssh_ip(name):
+    import subprocess
+    import re
+    try:
+        r = subprocess.run(
+            ["virsh", "-c", LIBVIRT_URI, "domifaddr", name],
+            capture_output=True, text=True, timeout=10
+        )
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    for line in r.stdout.splitlines():
+        m = re.search(r"(\d+\.\d+\.\d+\.\d+)(?:/\d+)?\s*$", line)
+        if m:
+            return m.group(1)
+    return None
+
+
+@sock.route("/ws/ssh/<name>")
+def ws_ssh(ws, name):
+    import json
+    import pty
+    import fcntl
+    import termios
+    import struct
+    import signal
+    import re
+
+    conn = get_conn()
+    active = None
+    try:
+        dom = conn.lookupByName(name)
+        active = dom.isActive()
+    except libvirt.libvirtError:
+        pass
+    finally:
+        conn.close()
+    if active is None:
+        ws.send(f"\x1b[31mVM '{name}' が見つかりません\x1b[0m")
+        return
+
+    user = request.args.get("user", "root")
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9._-]*\$?", user):
+        ws.send("\x1b[31m不正なユーザー名です\x1b[0m")
+        return
+
+    ip = _vm_ssh_ip(name) if active else None
+    if not ip:
+        ws.send("\x1b[31mIPアドレスを取得できません（VMが稼働していないか、ネットワーク未接続です）\x1b[0m")
+        return
+
+    ssh_cmd = [
+        "ssh",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "ConnectTimeout=10",
+        f"{user}@{ip}",
+    ]
+
+    pid, master_fd = pty.fork()
+    if pid == 0:
+        env = os.environ.copy()
+        env["TERM"] = "xterm-256color"
+        env.pop("SSH_AUTH_SOCK", None)
+        try:
+            os.execvpe(ssh_cmd[0], ssh_cmd, env)
+        except Exception:
+            pass
+        os._exit(127)
+
+    def _pty_reader():
+        try:
+            while True:
+                data = os.read(master_fd, 4096)
+                if not data:
+                    break
+                ws.send(data.decode("utf-8", errors="replace"))
+        except Exception:
+            pass
+
+    reader_thread = threading.Thread(target=_pty_reader, daemon=True)
+    reader_thread.start()
+
+    try:
+        while True:
+            msg = ws.receive()
+            if msg is None:
+                break
+            try:
+                data = json.loads(msg)
+            except (ValueError, TypeError):
+                continue
+            try:
+                if data.get("type") == "input":
+                    os.write(master_fd, str(data.get("data", "")).encode("utf-8"))
+                elif data.get("type") == "resize":
+                    winsize = struct.pack(
+                        "HHHH",
+                        int(data.get("rows", 24)),
+                        int(data.get("cols", 80)),
+                        0, 0,
+                    )
+                    fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize)
+            except (OSError, ValueError):
+                pass
+    except Exception:
+        pass
+    finally:
+        try:
+            os.close(master_fd)
+        except OSError:
+            pass
+        for sig in (signal.SIGHUP, signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.kill(pid, sig)
+            except OSError:
+                break
+            time.sleep(0.05)
+        try:
+            os.waitpid(pid, os.WNOHANG)
+        except (OSError, ChildProcessError):
+            pass
 
 
 @app.route("/api/server/restart", methods=["POST"])

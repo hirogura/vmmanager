@@ -23,6 +23,9 @@
             <dt>CPU</dt><dd>{{ vm.vcpus }} vCPU</dd>
             <dt>メモリ</dt><dd>{{ vm.memory_mb }} MB</dd>
             <dt>マシン</dt><dd>{{ vm.machine }}</dd>
+            {% if vm.state == 'running' %}
+            <dt>IPアドレス</dt><dd class="vm-ip" data-vm="{{ vm.name }}" style="font-family:monospace">取得中...</dd>
+            {% endif %}
         </dl>
         <div class="btn-group">
             {% if vm.state == 'stopped' %}
@@ -47,6 +50,25 @@
 {% endblock %}
 {% block scripts %}
 <script>
+document.addEventListener('DOMContentLoaded', function() {
+    document.querySelectorAll('.vm-ip').forEach(el => {
+        const name = el.dataset.vm;
+        fetch(`/api/vm/${encodeURIComponent(name)}/ip`).then(r => r.json()).then(data => {
+            if (!data.interfaces || !data.interfaces.length) {
+                el.textContent = '-';
+                el.style.fontFamily = '';
+                return;
+            }
+            el.innerHTML = data.interfaces.map(i =>
+                `<span style="margin-right:8px">${i.name}: ${i.ip}${i.prefix ? '/' + i.prefix : ''}</span>`
+            ).join('');
+        }).catch(() => {
+            el.textContent = '-';
+            el.style.fontFamily = '';
+        });
+    });
+});
+
 function vmAction(name, action) {
     if (action === 'undefine') {
         if (!confirm('このVMを削除しますか？')) return;

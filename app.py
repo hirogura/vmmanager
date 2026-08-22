@@ -54,6 +54,7 @@ def index():
         dom = conn.lookupByName(name)
         vms.append(_vm_info(dom))
     conn.close()
+    vms.sort(key=lambda v: v["name"].lower())
     return render_template("index.html", vms=vms)
 
 

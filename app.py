@@ -2154,9 +2154,13 @@ def api_snapshot_revert(name):
         conn.close()
         return jsonify({"error": f"VM '{name}' が見つかりません"}), 404
 
-    if dom.isActive():
-        conn.close()
-        return jsonify({"error": "VMを停止してから元に戻してください"}), 400
+    was_running = dom.isActive()
+    if was_running:
+        try:
+            dom.destroy()
+        except libvirt.libvirtError as e:
+            conn.close()
+            return jsonify({"error": f"VMの強制停止に失敗しました: {e}"}), 500
 
     snap_name = (request.json or {}).get("name", "")
     if not snap_name:
@@ -2168,7 +2172,7 @@ def api_snapshot_revert(name):
         flags = libvirt.VIR_DOMAIN_SNAPSHOT_REVERT_RUNNING
         dom.revertToSnapshot(snap, flags)
         conn.close()
-        return jsonify({"success": True})
+        return jsonify({"success": True, "was_running": was_running})
     except libvirt.libvirtError as e:
         conn.close()
         return jsonify({"error": str(e)}), 400

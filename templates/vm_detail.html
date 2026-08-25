@@ -1129,7 +1129,7 @@ function revertSnapshot(snapName) {
         body: JSON.stringify({name: snapName})
     })
     .then(r => r.json())
-    .then(d => { if (d.error) alert('エラー: ' + d.error); else { alert('元に戻しました'); location.reload(); }})
+    .then(d => { if (d.error) alert('エラー: ' + d.error); else { alert(d.was_running ? '強制停止して元に戻しました' : '元に戻しました'); location.reload(); }})
     .catch(err => alert('通信エラー: ' + err));
 }
 

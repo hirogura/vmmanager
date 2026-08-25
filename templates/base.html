@@ -16,9 +16,10 @@
         <a href="/" class="sidebar-header">
             <i class="fas fa-server"></i>
             <span>VM Manager</span>
-            <span class="version">v.1.1.1</span>
+            <span class="version">v.1.1.2</span>
         </a>
         <ul class="sidebar-menu">
+            <li><a href="/" class="{% if request.endpoint == 'index' %}active{% endif %}"><i class="fas fa-list"></i> 一覧 / SSHターミナル</a></li>
             <li><a href="/vm/create" class="{% if request.endpoint == 'vm_create' %}active{% endif %}"><i class="fas fa-plus-circle"></i> 新規作成</a></li>
             <li><button type="button" id="btn-server-restart" class="sidebar-btn"><i class="fas fa-sync-alt"></i> サーバ再起動</button></li>
             <li><button type="button" id="btn-server-update" class="sidebar-btn"><i class="fas fa-cloud-download-alt"></i> サーバアップデート</button></li>

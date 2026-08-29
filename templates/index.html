@@ -193,11 +193,24 @@ window.addEventListener('resize', () => {
 function vmAction(name, action) {
     if (action === 'undefine') {
         if (!confirm('このVMを削除しますか？')) return;
-        const deleteDisk = confirm('ディスクファイルも削除しますか？');
-        fetch(`/api/vm/${name}/action`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({action: action, delete_disk: deleteDisk})
+        fetch(`/api/vm/${encodeURIComponent(name)}/disks`)
+        .then(r => r.json())
+        .then(data => {
+            const deleteDisks = [];
+            if (data && data.disks && data.disks.length) {
+                for (const disk of data.disks) {
+                    if (confirm(`「${disk.name}」も削除しますか？`)) {
+                        deleteDisks.push(disk.path);
+                    }
+                }
+            }
+            const body = {action: action};
+            if (deleteDisks.length) body.delete_disks = deleteDisks;
+            return fetch(`/api/vm/${encodeURIComponent(name)}/action`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(body)
+            });
         })
         .then(r => r.json())
         .then(data => {

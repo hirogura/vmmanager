@@ -755,10 +755,12 @@ def vm_action(name):
                 return jsonify({"error": "先にVMを停止してください"}), 400
 
             delete_disk = request.json.get("delete_disk", False)
+            delete_disks = request.json.get("delete_disks") or []
             disk_paths = []
-            if delete_disk:
+            if delete_disk or delete_disks:
                 xml_str = dom.XMLDesc(0)
                 root = ET.fromstring(xml_str)
+                disk_paths = []
                 for disk in root.findall(".//disk"):
                     device = disk.get("device", "disk")
                     if device == "cdrom":
@@ -779,6 +781,8 @@ def vm_action(name):
                                 pass
                     if path:
                         disk_paths.append(path)
+                if delete_disks:
+                    disk_paths = [dp for dp in disk_paths if dp in delete_disks]
 
             import subprocess
             try:
@@ -793,7 +797,7 @@ def vm_action(name):
                     conn.close()
                     return jsonify({"error": str(ue)}), 400
 
-            if delete_disk and disk_paths:
+            if disk_paths:
                 for dp in disk_paths:
                     try:
                         subprocess.run(
@@ -1734,6 +1738,42 @@ def vm_xml(name):
         except libvirt.libvirtError as e:
             conn.close()
             return jsonify({"error": str(e)}), 400
+
+
+@app.route("/api/vm/<name>/disks", methods=["GET"])
+def vm_disks(name):
+    conn = get_conn()
+    try:
+        dom = conn.lookupByName(name)
+    except libvirt.libvirtError:
+        conn.close()
+        return jsonify({"error": f"VM '{name}' が見つかりません"}), 404
+
+    xml_str = dom.XMLDesc(0)
+    root = ET.fromstring(xml_str)
+    disks = []
+    for disk in root.findall(".//disk"):
+        device = disk.get("device", "disk")
+        if device == "cdrom":
+            continue
+        source = disk.find("source")
+        if source is None:
+            continue
+        path = source.get("file", "") or source.get("dev", "")
+        if not path:
+            pool_name = source.get("pool", "")
+            vol_name = source.get("volume", "")
+            if pool_name and vol_name:
+                try:
+                    pool = conn.storagePoolLookupByName(pool_name)
+                    vol = pool.storageVolLookupByName(vol_name)
+                    path = vol.path()
+                except Exception:
+                    continue
+        if path:
+            disks.append({"path": path, "name": os.path.basename(path)})
+    conn.close()
+    return jsonify({"disks": disks})
 
 
 @app.route("/api/vm/<name>/bootorder", methods=["GET", "PUT"])

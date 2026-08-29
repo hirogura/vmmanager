@@ -1009,19 +1009,35 @@ def vm_action(name):
                     xml_str = dom.XMLDesc(0)
                     root = ET.fromstring(xml_str)
                     devices_el = root.find(".//devices")
-                    removed = False
+                    disk_el = None
                     for disk in root.findall(".//disk"):
                         target = disk.find("target")
                         if target is not None and target.get("dev") == target_dev:
-                            devices_el.remove(disk)
-                            removed = True
+                            disk_el = disk
                             break
-                    if not removed:
+                    if disk_el is None:
                         result = {"error": f"デバイス '{target_dev}' が見つかりません"}
                     else:
-                        new_xml = ET.tostring(root, encoding="unicode")
-                        conn.defineXML(new_xml)
-                        result = {"success": True}
+                        if dom.isActive():
+                            import subprocess, tempfile
+                            disk_xml = ET.tostring(disk_el, encoding="unicode")
+                            with tempfile.NamedTemporaryFile(mode='w', suffix='.xml', delete=False) as f:
+                                f.write(disk_xml)
+                                tmp_path = f.name
+                            r = subprocess.run(
+                                ["sudo", "virsh", "detach-device", name, "--file", tmp_path, "--live", "--persistent"],
+                                capture_output=True, text=True, timeout=15
+                            )
+                            subprocess.run(["sudo", "rm", "-f", tmp_path], capture_output=True, timeout=5)
+                            if r.returncode != 0:
+                                result = {"error": r.stderr.strip() or r.stdout.strip()}
+                            else:
+                                result = {"success": True}
+                        else:
+                            devices_el.remove(disk_el)
+                            new_xml = ET.tostring(root, encoding="unicode")
+                            conn.defineXML(new_xml)
+                            result = {"success": True}
                 except libvirt.libvirtError as e:
                     result = {"error": str(e)}
         elif action == "hostdev_detach":

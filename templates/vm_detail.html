@@ -121,17 +121,15 @@
 <div class="card">
     <div class="card-header">
         <h2><i class="fas fa-hdd"></i> ディスク</h2>
-        {% if not is_active %}
         <button type="button" class="btn btn-primary btn-sm" onclick="addNewDisk()"><i class="fas fa-plus"></i> 追加</button>
-        {% endif %}
     </div>
-    <p style="color:var(--text-muted);font-size:10px;margin-bottom:8px">{% if is_active %}停止後に変更可能{% else %}↑↓で順序変更{% endif %}</p>
+    <p style="color:var(--text-muted);font-size:10px;margin-bottom:8px">{% if is_active %}稼働中はUSBバスのみ追加・取り外しできます{% else %}↑↓で順序変更{% endif %}</p>
     {% if devices.disks %}
     <table>
         <thead><tr><th style="width:30px"></th><th>デバイス</th><th>タイプ</th><th>ソース</th><th>バス</th><th style="width:100px"></th></tr></thead>
         <tbody id="disk-list">
         {% for d in devices.disks %}
-        <tr data-target="{{ d.target_dev }}" data-device="{{ d.device }}" {% if d.source_file %}data-source="{{ d.source_file }}"{% endif %}>
+        <tr data-target="{{ d.target_dev }}" data-device="{{ d.device }}" data-bus="{{ d.target_bus or '' }}" {% if d.source_file %}data-source="{{ d.source_file }}"{% endif %}>
             <td style="color:var(--text-muted);font-weight:500">{{ loop.index }}</td>
             <td style="font-family:monospace">{{ d.target_dev or '-' }}</td>
             <td><span class="badge badge-success">{{ d.type }}/{{ d.device }}</span></td>
@@ -148,11 +146,11 @@
                 {% endif %}
                 <button type="button" class="btn btn-info btn-sm btn-icon" onclick="changeIso('{{ d.target_dev }}')" title="ISO変更"><i class="fas fa-exchange-alt"></i></button>
                 {% endif %}
-                {% if d.driver_type == 'qcow2' and not is_active %}
+                {% if d.driver_type == 'qcow2' and (not is_active or d.target_bus == 'usb') %}
                 <button type="button" class="btn btn-warning btn-sm btn-icon" onclick="resizeDisk('{{ d.target_dev }}', '{{ d.source_file }}')" title="拡大"><i class="fas fa-expand-arrows-alt"></i></button>
                 {% endif %}
-                {% if not is_active %}
-                <button type="button" class="btn btn-danger btn-sm btn-icon" onclick="detachDisk('{{ d.target_dev }}', '{{ d.device }}')" title="削除"><i class="fas fa-trash"></i></button>
+                {% if not is_active or d.target_bus == 'usb' %}
+                <button type="button" class="btn btn-danger btn-sm btn-icon" onclick="detachDisk('{{ d.target_dev }}', '{{ d.device }}')" title="{% if d.target_bus == 'usb' and is_active %}取り外し{% else %}削除{% endif %}"><i class="fas fa-times"></i></button>
                 {% endif %}
             </td>
         </tr>
@@ -430,6 +428,7 @@ function addNewDisk() {
     else if (nextSata) nextTarget = nextSata;
 
     const allTargets = [...virtioTargets.slice(1), ...sataTargets];
+    const usbOnly = {{ 'true' if is_active else 'false' }};
 
     const html = `
     <div class="disk-item" id="new-disk-${idx}">
@@ -438,12 +437,15 @@ function addNewDisk() {
             <div class="form-group">
                 <label>タイプ</label>
                 <select name="new_type_${idx}" onchange="updateDiskSourceWidget(this, ${idx})">
-                    <option value="file">ファイル (既存)</option>
-                    <option value="file_create">ファイル (空のディスク作成)</option>
-                    <option value="usb_file_create">USBメモリ (空のディスク作成)</option>
-                    <option value="block">ブロックデバイス</option>
-                    <option value="block_lun">ブロックデバイス (LUN)</option>
-                    <option value="cdrom">CD-ROM (ISO)</option>
+                    ${usbOnly
+                        ? `<option value="usb_file_create">USBメモリ (空のディスク作成)</option>
+                           <option value="file">ファイル (既存)</option>`
+                        : `<option value="file">ファイル (既存)</option>
+                           <option value="file_create">ファイル (空のディスク作成)</option>
+                           <option value="usb_file_create">USBメモリ (空のディスク作成)</option>
+                           <option value="block">ブロックデバイス</option>
+                           <option value="block_lun">ブロックデバイス (LUN)</option>
+                           <option value="cdrom">CD-ROM (ISO)</option>`}
                 </select>
             </div>
             <div class="form-group" id="new-source-${idx}">
@@ -453,18 +455,22 @@ function addNewDisk() {
             <div class="form-group">
                 <label>ターゲット</label>
                 <select name="new_target_${idx}">
-                    ${allTargets.map(t => `<option value="${t}"${t===nextTarget?' selected':''}>${t}</option>`).join('')}
+                    ${usbOnly
+                        ? `<option value="sdb">sdb</option><option value="sdc">sdc</option><option value="sdd">sdd</option><option value="sde">sde</option>`
+                        : allTargets.map(t => `<option value="${t}"${t===nextTarget?' selected':''}>${t}</option>`).join('')}
                 </select>
             </div>
         </div>
         <div class="form-row">
             <div class="form-group">
                 <label>バス</label>
-                <select name="new_bus_${idx}">
-                    <option value="virtio">virtio</option>
-                    <option value="sata">SATA</option>
-                    <option value="scsi">SCSI</option>
-                    <option value="usb">USB</option>
+                <select name="new_bus_${idx}" onchange="updateDiskBusWidget(this, ${idx})">
+                    ${usbOnly
+                        ? `<option value="usb">USB</option>`
+                        : `<option value="virtio">virtio</option>
+                           <option value="sata">SATA</option>
+                           <option value="scsi">SCSI</option>
+                           <option value="usb">USB</option>`}
                 </select>
             </div>
             <div class="form-group">
@@ -520,7 +526,7 @@ function confirmAddDisk(idx) {
     } else if (dtype === 'cdrom') {
         diskXml = `<disk type='file' device='cdrom'><driver name='qemu' type='raw'/>`;
         if (src) diskXml += `<source file='${src}'/>`;
-        diskXml += `<target dev='${targetDev}' bus='sata'/><readonly/></disk>`;
+        diskXml += `<target dev='${targetDev}' bus='${targetBus || 'sata'}'/><readonly/></disk>`;
     } else {
         diskXml = `<disk type='file' device='disk'><driver name='qemu' type='${driverType}'/><source file='${src}'/><target dev='${targetDev}' bus='${targetBus}'/></disk>`;
     }
@@ -588,7 +594,7 @@ function updateDiskSourceWidget(sel, idx) {
         });
     } else if (sel.value === 'cdrom') {
         target.value = 'sdc';
-        bus.value = 'sata';
+        bus.value = 'scsi';
         driver.value = 'raw';
         container.innerHTML = '<label>ISOファイル</label><select name="new_source_' + idx + '" style="width:100%"><option value="">読み込み中...</option></select>';
         fetch('/api/iso-files').then(r => r.json()).then(isos => {
@@ -605,24 +611,75 @@ function updateDiskSourceWidget(sel, idx) {
             }
         });
     } else {
-        target.value = 'vdb';
-        bus.value = 'virtio';
-        driver.value = 'qcow2';
-        container.innerHTML = '<label>ストレージプール ボリューム</label><select name="new_source_' + idx + '" style="width:100%"><option value="">読み込み中...</option></select>';
-        fetch('/api/storage-pool-volumes').then(r => r.json()).then(vols => {
-            const s = container.querySelector('select');
-            s.innerHTML = '<option value="">-- ボリュームを選択 --</option>';
-            vols.filter(v => v.name.endsWith('.qcow2')).forEach(v => {
-                const opt = document.createElement('option');
-                opt.value = v.path;
-                opt.textContent = v.label;
-                s.appendChild(opt);
+        const usbOnly = {{ 'true' if is_active else 'false' }};
+        if (usbOnly) {
+            target.value = 'sdb';
+            bus.value = 'usb';
+            driver.value = 'qcow2';
+            container.innerHTML = '<label>ストレージプール ボリューム</label><select name="new_source_' + idx + '" style="width:100%"><option value="">読み込み中...</option></select>';
+            fetch('/api/storage-pool-volumes').then(r => r.json()).then(vols => {
+                const s = container.querySelector('select');
+                s.innerHTML = '<option value="">-- ボリュームを選択 --</option>';
+                vols.filter(v => /\.(qcow2|img|raw)$/i.test(v.name)).forEach(v => {
+                    const opt = document.createElement('option');
+                    opt.value = v.path;
+                    opt.textContent = v.label;
+                    s.appendChild(opt);
+                });
+                if (!s.options.length || s.options.length === 1) {
+                    s.innerHTML = '<option value="">ボリュームがありません</option>';
+                }
             });
-            if (!s.options.length || s.options.length === 1) {
-                s.innerHTML = '<option value="">qcow2ボリュームがありません</option>';
-            }
-        });
+        } else {
+            target.value = 'vdb';
+            bus.value = 'virtio';
+            driver.value = 'qcow2';
+            container.innerHTML = '<label>ストレージプール ボリューム</label><select name="new_source_' + idx + '" style="width:100%"><option value="">読み込み中...</option></select>';
+            fetch('/api/storage-pool-volumes').then(r => r.json()).then(vols => {
+                const s = container.querySelector('select');
+                s.innerHTML = '<option value="">-- ボリュームを選択 --</option>';
+                vols.filter(v => v.name.endsWith('.qcow2')).forEach(v => {
+                    const opt = document.createElement('option');
+                    opt.value = v.path;
+                    opt.textContent = v.label;
+                    s.appendChild(opt);
+                });
+                if (!s.options.length || s.options.length === 1) {
+                    s.innerHTML = '<option value="">qcow2ボリュームがありません</option>';
+                }
+            });
+        }
     }
+}
+
+function updateDiskBusWidget(sel, idx) {
+    const item = sel.closest('.disk-item');
+    const dtypeEl = item.querySelector(`[name="new_type_${idx}"]`);
+    const targetEl = item.querySelector(`[name="new_target_${idx}"]`);
+    if (!targetEl) return;
+    const dtype = dtypeEl ? dtypeEl.value : '';
+    let bus = sel.value;
+
+    if (dtype === 'cdrom' && bus === 'virtio') {
+        alert('virtio (virtio-blk) バスはCD-ROMの取り付けに対応していません。\n仮想CD-ROMは virtio-scsi (SCSI) または SATA を利用してください。');
+        sel.value = 'scsi';
+        bus = 'scsi';
+    }
+
+    const usedTargets = new Set();
+    document.querySelectorAll('#disk-list tr').forEach(tr => {
+        const t = tr.dataset.target;
+        if (t) usedTargets.add(t);
+    });
+    document.querySelectorAll('[name^="new_target_"]').forEach(s => {
+        if (s.value) usedTargets.add(s.value);
+    });
+
+    const base = (bus === 'virtio') ? ['vda','vdb','vdc','vdd','vde','vdf','vdg','vdh'] : ['sda','sdb','sdc','sdd','sde'];
+    const candidates = base.filter(t => !usedTargets.has(t));
+    const next = candidates[0] || base[0];
+
+    targetEl.innerHTML = base.map(t => `<option value="${t}"${t===next?' selected':''}>${t}</option>`).join('');
 }
 
 async function collectFormData() {
@@ -771,6 +828,7 @@ function updateDiskNumbers() {
         if (!td) return;
         const target = tr.dataset.target;
         const device = tr.dataset.device;
+        const bus = tr.dataset.bus || '';
         const isActive = {{ 'true' if is_active else 'false' }};
         if (!isActive) {
             if (i > 0) td.innerHTML += `<button type="button" class="btn btn-secondary btn-sm" onclick="moveDisk(this,-1)" title="上へ"><i class="fas fa-arrow-up"></i></button>`;
@@ -780,7 +838,10 @@ function updateDiskNumbers() {
             if (tr.dataset.source) td.innerHTML += `<button type="button" class="btn btn-warning btn-sm" onclick="ejectIso('${target}')" title="ISO取り出し"><i class="fas fa-eject"></i></button>`;
             td.innerHTML += `<button type="button" class="btn btn-info btn-sm" onclick="changeIso('${target}')" title="ISO変更"><i class="fas fa-exchange-alt"></i></button>`;
         }
-        if (!isActive) td.innerHTML += `<button type="button" class="btn btn-danger btn-sm" onclick="detachDisk('${target}', '${device}')" title="削除"><i class="fas fa-trash"></i></button>`;
+        if (!isActive || bus === 'usb') {
+            const title = (isActive && bus === 'usb') ? '取り外し' : '削除';
+            td.innerHTML += `<button type="button" class="btn btn-danger btn-sm" onclick="detachDisk('${target}', '${device}')" title="${title}"><i class="fas fa-times"></i></button>`;
+        }
     });
 }
 

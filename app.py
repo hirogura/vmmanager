@@ -15,6 +15,16 @@ sock = Sock(app)
 app.secret_key = os.urandom(24)
 app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024 * 1024
 
+
+@app.after_request
+def apply_no_cache(response):
+    if response.mimetype in ("text/html", "text/javascript"):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+
 LIBVIRT_URI = "qemu:///system"
 
 

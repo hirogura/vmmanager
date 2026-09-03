@@ -20,6 +20,10 @@
                 <input type="checkbox" name="hyperv_enabled" id="hyperv_enabled">
                 <label for="hyperv_enabled">Hyper-V拡張を有効化（Windows11などをインストールする場合はOnに）</label>
             </div>
+            <div class="checkbox-group" style="white-space:nowrap">
+                <input type="checkbox" name="usb_tablet" id="usb_tablet">
+                <label for="usb_tablet">USBタブレット（Windows11などでマウス操作が安定します）</label>
+            </div>
         </div>
     </div>
     <div class="form-row">
@@ -188,6 +192,7 @@ function collectFormData() {
         existing_disk_path: f.elements['existing_disk_path'] ? f.elements['existing_disk_path'].value : '',
         tpm_enabled: f.elements['tpm_enabled'].checked,
         hyperv_enabled: f.elements['hyperv_enabled'].checked,
+        usb_tablet: f.elements['usb_tablet'].checked,
         net_mac: f.elements['net_mac'].value.trim()
     };
 }

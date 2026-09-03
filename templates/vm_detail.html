@@ -594,7 +594,7 @@ function updateDiskSourceWidget(sel, idx) {
         });
     } else if (sel.value === 'cdrom') {
         target.value = 'sdc';
-        bus.value = 'scsi';
+        bus.value = 'sata';
         driver.value = 'raw';
         container.innerHTML = '<label>ISOファイル</label><select name="new_source_' + idx + '" style="width:100%"><option value="">読み込み中...</option></select>';
         fetch('/api/iso-files').then(r => r.json()).then(isos => {
@@ -662,8 +662,8 @@ function updateDiskBusWidget(sel, idx) {
 
     if (dtype === 'cdrom' && bus === 'virtio') {
         alert('virtio (virtio-blk) バスはCD-ROMの取り付けに対応していません。\n仮想CD-ROMは virtio-scsi (SCSI) または SATA を利用してください。');
-        sel.value = 'scsi';
-        bus = 'scsi';
+        sel.value = 'sata';
+        bus = 'sata';
     }
 
     const usedTargets = new Set();

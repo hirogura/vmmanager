@@ -31,6 +31,7 @@
     <div class="console-header">
         <i class="fas fa-terminal" style="color:var(--text-muted)"></i>
         <span style="flex:1;font-weight:500">VNC Console</span>
+        <button type="button" id="vnc-btn-terminal" class="btn btn-secondary btn-sm" title="VNCの右側にSSHターミナルを表示します">ターミナル: Off</button>
         <span id="vnc-status" class="status connected">接続済み</span>
         <div style="display:flex;gap:2px">
             <button type="button" class="btn btn-secondary btn-sm vnc-size-btn active" data-size="small">小</button>
@@ -44,7 +45,21 @@
         </label>
         <button type="button" id="vnc-btn-refresh" onclick="cleanupRfb();connectVnc();" class="btn btn-danger btn-sm"><i class="fas fa-sync-alt"></i> 再接続</button>
     </div>
-    <div id="vnc-container" style="width:40%;aspect-ratio:4/3;background:#000;display:flex;align-items:center;justify-content:center;position:relative;transition:all 0.3s">
+    <div id="vnc-console-area">
+        <div id="vnc-container" style="width:40%;aspect-ratio:4/3;background:#000;display:flex;align-items:center;justify-content:center;position:relative;transition:all 0.3s">
+        </div>
+        <div id="vm-terminal-panel">
+            <div class="ssh-terminal-header">
+                <h3 style="margin:0"><i class="fas fa-terminal"></i> SSHターミナル <span id="vm-ssh-status" class="badge badge-info">未接続</span></h3>
+                <span class="spacer"></span>
+                <label>ユーザー:
+                    <input type="text" id="vm-ssh-user" value="root" spellcheck="false">
+                </label>
+                <button class="btn btn-primary btn-sm" id="btn-vm-ssh-connect" onclick="vmSshConnect()"><i class="fas fa-plug"></i> 接続</button>
+                <button class="btn btn-danger btn-sm" id="btn-vm-ssh-disconnect" onclick="vmSshDisconnect()" disabled><i class="fas fa-times"></i> 切断</button>
+            </div>
+            <div id="vm-terminal-container"></div>
+        </div>
     </div>
 </div>
 
@@ -365,6 +380,9 @@
 {% endblock %}
 
 {% block scripts %}
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
 <script>
 let newDiskCount = 0;
 let hasUnsavedChanges = false;
@@ -1218,6 +1236,132 @@ function deleteSnapshot(snapName) {
     .then(d => { if (d.error) alert('エラー: ' + d.error); else { alert('削除しました'); loadSnapshots(); }})
     .catch(err => alert('通信エラー: ' + err));
 }
+
+// ============================================================
+// SSHターミナル（接続先はこのVMに固定）
+// ============================================================
+let vmSshTerm = null, vmSshFit = null, vmSshWs = null;
+
+function vmSshSetStatus(text, cls) {
+    const el = document.getElementById('vm-ssh-status');
+    el.textContent = text;
+    el.className = 'badge ' + cls;
+}
+
+function vmSshCloseSocket(silent) {
+    if (!vmSshWs) return;
+    if (silent) vmSshWs.onclose = null;
+    try { vmSshWs.close(); } catch (e) {}
+    vmSshWs = null;
+}
+
+function vmSshResetButtons() {
+    document.getElementById('btn-vm-ssh-connect').disabled = false;
+    document.getElementById('btn-vm-ssh-disconnect').disabled = true;
+}
+
+function vmSshConnect() {
+    if (typeof Terminal === 'undefined') {
+        alert('xterm.jsの読み込みに失敗しました。ネットワーク接続を確認してください。');
+        return;
+    }
+    const name = "{{ vm.name }}";
+    const user = document.getElementById('vm-ssh-user').value.trim() || 'root';
+
+    vmSshCloseSocket(true);
+
+    const container = document.getElementById('vm-terminal-container');
+    container.innerHTML = '';
+    if (vmSshTerm) { vmSshTerm.dispose(); vmSshTerm = null; }
+
+    vmSshTerm = new Terminal({
+        cursorBlink: true,
+        fontSize: 13,
+        fontFamily: '"SF Mono", Menlo, Consolas, monospace',
+        theme: {
+            background: '#1a1b26',
+            foreground: '#c0caf5',
+            cursor: '#c0caf5',
+            selectionBackground: '#33467c',
+        },
+    });
+    vmSshFit = new FitAddon.FitAddon();
+    vmSshTerm.loadAddon(vmSshFit);
+    vmSshTerm.open(container);
+    setTimeout(() => { if (vmSshFit) vmSshFit.fit(); }, 50);
+
+    vmSshTerm.onData(data => {
+        if (vmSshWs && vmSshWs.readyState === WebSocket.OPEN) {
+            vmSshWs.send(JSON.stringify({type: 'input', data}));
+        }
+    });
+    vmSshTerm.onResize(({cols, rows}) => {
+        if (vmSshWs && vmSshWs.readyState === WebSocket.OPEN) {
+            vmSshWs.send(JSON.stringify({type: 'resize', cols, rows}));
+        }
+    });
+
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    vmSshWs = new WebSocket(`${proto}://${location.host}/ws/ssh/${encodeURIComponent(name)}?user=${encodeURIComponent(user)}`);
+
+    let gotOutput = false;
+    vmSshWs.onopen = () => {
+        vmSshSetStatus('接続中...', 'badge badge-warning');
+        vmSshWs.send(JSON.stringify({type: 'resize', cols: vmSshTerm.cols, rows: vmSshTerm.rows}));
+        vmSshTerm.focus();
+    };
+    vmSshWs.onmessage = e => {
+        if (!gotOutput) {
+            gotOutput = true;
+            vmSshSetStatus('接続済み', 'badge badge-success');
+        }
+        vmSshTerm.write(e.data);
+    };
+    vmSshWs.onclose = () => {
+        vmSshWs = null;
+        vmSshSetStatus('切断', 'badge badge-danger');
+        if (vmSshTerm) vmSshTerm.writeln('\r\n\x1b[31m[接続が閉じました]\x1b[0m');
+        vmSshResetButtons();
+    };
+
+    document.getElementById('btn-vm-ssh-connect').disabled = true;
+    document.getElementById('btn-vm-ssh-disconnect').disabled = false;
+    vmSshSetStatus('接続中...', 'badge badge-warning');
+}
+
+function vmSshDisconnect() {
+    vmSshCloseSocket(false);
+    vmSshSetStatus('切断', 'badge badge-danger');
+    if (vmSshTerm) vmSshTerm.writeln('\r\n\x1b[31m[切断しました]\x1b[0m');
+    vmSshResetButtons();
+}
+
+window.addEventListener('resize', () => {
+    if (vmSshFit && vmSshTerm) vmSshFit.fit();
+});
+
+// ターミナル表示切替（デフォルト Off）
+const vmTerminalPanel = document.getElementById('vm-terminal-panel');
+const btnVmTerminal = document.getElementById('vnc-btn-terminal');
+let vmTerminalOn = false;
+
+btnVmTerminal.addEventListener('click', () => {
+    vmTerminalOn = !vmTerminalOn;
+    if (vmTerminalOn) {
+        vmTerminalPanel.classList.add('on');
+        btnVmTerminal.textContent = 'ターミナル: On';
+        btnVmTerminal.style.background = '#2980b9';
+        btnVmTerminal.style.borderColor = '#2980b9';
+        btnVmTerminal.style.color = '#fff';
+        setTimeout(() => { if (vmSshFit) vmSshFit.fit(); }, 100);
+    } else {
+        vmTerminalPanel.classList.remove('on');
+        btnVmTerminal.textContent = 'ターミナル: Off';
+        btnVmTerminal.style.background = '';
+        btnVmTerminal.style.borderColor = '';
+        btnVmTerminal.style.color = '';
+    }
+});
 </script>
 
 <script type="module">

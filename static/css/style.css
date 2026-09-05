@@ -633,6 +633,49 @@ tr:hover td { background: rgba(255, 255, 255, 0.02); }
     min-height: 360px;
 }
 
+/* Terminal panel inside the VM detail VNC console */
+#vnc-console-area {
+    display: flex;
+    align-items: stretch;
+    transition: all 0.3s;
+}
+
+#vm-terminal-panel {
+    display: none;
+    flex: 1;
+    min-width: 0;
+    flex-direction: column;
+    background: #1a1b26;
+    border-left: 1px solid var(--border);
+}
+
+#vm-terminal-panel.on {
+    display: flex;
+}
+
+#vm-terminal-panel .ssh-terminal-header {
+    margin-bottom: 0;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-sidebar);
+    flex-shrink: 0;
+}
+
+#vm-terminal-panel .ssh-terminal-header .spacer { flex: 1; }
+
+#vm-terminal-container {
+    flex: 1;
+    min-height: 280px;
+    overflow: hidden;
+    padding: 6px;
+}
+
+#vnc-btn-terminal.active {
+    background: #2980b9;
+    border-color: #2980b9;
+    color: #fff;
+}
+
 /* Pulse animation for unsaved changes */
 .btn-pulse {
     animation: btnPulse 1.5s ease-in-out infinite;

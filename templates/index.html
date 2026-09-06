@@ -1,0 +1,239 @@
+{% extends "base.html" %}
+{% block title %}VM一覧 - VM Manager{% endblock %}
+{% block content %}
+<div class="action-bar">
+    <h1 style="margin:0"><i class="fas fa-server"></i> 仮想マシン</h1>
+    <span class="badge badge-info">{{ vms|length }}台</span>
+    <span class="spacer"></span>
+    <a href="/vm/create" class="btn btn-primary btn-sm"><i class="fas fa-plus"></i> 新規作成</a>
+</div>
+{% if vms %}
+<div class="grid grid-2">
+    {% for vm in vms %}
+    <div class="vm-card">
+        <div class="vm-card-header">
+            <h3><a href="/vm/{{ vm.name }}" style="color:inherit;text-decoration:none">{{ vm.name }}</a></h3>
+            <span class="status-badge status-{{ vm.state }}">
+                <i class="fas fa-{{ 'circle-play' if vm.state == 'running' else 'circle-stop' }}"></i>
+                {{ '稼働中' if vm.state == 'running' else '停止中' }}
+            </span>
+        </div>
+        <dl class="vm-info">
+            <dt>タイプ</dt><dd>{{ vm.domain_type|upper }}</dd>
+            <dt>CPU</dt><dd>{{ vm.vcpus }} vCPU</dd>
+            <dt>メモリ</dt><dd>{{ vm.memory_mb }} MB</dd>
+            <dt>マシン</dt><dd>{{ vm.machine }}</dd>
+            {% if vm.state == 'running' %}
+            <dt>IPアドレス</dt><dd class="vm-ip" data-vm="{{ vm.name }}" style="font-family:monospace">取得中...</dd>
+            {% endif %}
+        </dl>
+        <div class="btn-group">
+            {% if vm.state == 'stopped' %}
+                <button class="btn btn-success btn-sm" onclick="vmAction('{{ vm.name }}', 'start')"><i class="fas fa-play"></i> 起動</button>
+            {% else %}
+                <button class="btn btn-warning btn-sm" onclick="vmAction('{{ vm.name }}', 'stop')"><i class="fas fa-stop"></i> 停止</button>
+                <button class="btn btn-danger btn-sm" onclick="vmAction('{{ vm.name }}', 'destroy')"><i class="fas fa-power-off"></i> 強制停止</button>
+                <button class="btn btn-info btn-sm" onclick="vmAction('{{ vm.name }}', 'reboot')"><i class="fas fa-redo"></i> 再起動</button>
+            {% endif %}
+            <a href="/vm/{{ vm.name }}" class="btn btn-info btn-sm"><i class="fas fa-cog"></i> 設定</a>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% else %}
+<div class="card" style="text-align:center;padding:40px">
+    <i class="fas fa-desktop" style="font-size:2em;color:var(--text-muted);margin-bottom:10px"></i>
+    <p style="color:var(--text-muted);font-size:12px">仮想マシンがありません</p>
+    <a href="/vm/create" class="btn btn-primary btn-sm" style="margin-top:10px"><i class="fas fa-plus"></i> 新規作成</a>
+</div>
+{% endif %}
+<div class="card ssh-terminal-card">
+    <div class="ssh-terminal-header">
+        <h3 style="margin:0"><i class="fas fa-terminal"></i> SSHターミナル <span id="ssh-status" class="badge badge-info">未接続</span></h3>
+        <span class="spacer"></span>
+        <label>VM:
+            <select id="ssh-vm-select">
+                {% for vm in vms %}{% if vm.state == 'running' %}<option value="{{ vm.name }}">{{ vm.name }}</option>{% endif %}{% endfor %}
+            </select>
+        </label>
+        <label>ユーザー:
+            <input type="text" id="ssh-user" value="root" spellcheck="false">
+        </label>
+        <button class="btn btn-primary btn-sm" id="btn-ssh-connect" onclick="sshConnect()"><i class="fas fa-plug"></i> 接続</button>
+        <button class="btn btn-danger btn-sm" id="btn-ssh-disconnect" onclick="sshDisconnect()" disabled><i class="fas fa-times"></i> 切断</button>
+    </div>
+    <div id="ssh-terminal-container"></div>
+</div>
+{% endblock %}
+{% block scripts %}
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    document.querySelectorAll('.vm-ip').forEach(el => {
+        const name = el.dataset.vm;
+        fetch(`/api/vm/${encodeURIComponent(name)}/ip`).then(r => r.json()).then(data => {
+            if (!data.interfaces || !data.interfaces.length) {
+                el.textContent = '-';
+                el.style.fontFamily = '';
+                return;
+            }
+            el.innerHTML = data.interfaces.map(i =>
+                `<span style="margin-right:8px">${i.name}: ${i.ip}${i.prefix ? '/' + i.prefix : ''}</span>`
+            ).join('');
+        }).catch(() => {
+            el.textContent = '-';
+            el.style.fontFamily = '';
+        });
+    });
+});
+
+let sshTerm = null, sshFit = null, sshWs = null;
+
+function sshSetStatus(text, cls) {
+    const el = document.getElementById('ssh-status');
+    el.textContent = text;
+    el.className = 'badge ' + cls;
+}
+
+function sshCloseSocket(silent) {
+    if (!sshWs) return;
+    if (silent) sshWs.onclose = null;
+    try { sshWs.close(); } catch (e) {}
+    sshWs = null;
+}
+
+function sshResetButtons() {
+    document.getElementById('btn-ssh-connect').disabled = false;
+    document.getElementById('btn-ssh-disconnect').disabled = true;
+}
+
+function sshConnect() {
+    if (typeof Terminal === 'undefined') {
+        alert('xterm.jsの読み込みに失敗しました。ネットワーク接続を確認してください。');
+        return;
+    }
+    const name = document.getElementById('ssh-vm-select').value;
+    if (!name) { alert('稼働中のVMがありません'); return; }
+    const user = document.getElementById('ssh-user').value.trim() || 'root';
+
+    sshCloseSocket(true);
+
+    const container = document.getElementById('ssh-terminal-container');
+    container.innerHTML = '';
+    if (sshTerm) { sshTerm.dispose(); sshTerm = null; }
+
+    sshTerm = new Terminal({
+        cursorBlink: true,
+        fontSize: 13,
+        fontFamily: '"SF Mono", Menlo, Consolas, monospace',
+        theme: {
+            background: '#1a1b26',
+            foreground: '#c0caf5',
+            cursor: '#c0caf5',
+            selectionBackground: '#33467c',
+        },
+    });
+    sshFit = new FitAddon.FitAddon();
+    sshTerm.loadAddon(sshFit);
+    sshTerm.open(container);
+    setTimeout(() => { if (sshFit) sshFit.fit(); }, 50);
+
+    sshTerm.onData(data => {
+        if (sshWs && sshWs.readyState === WebSocket.OPEN) {
+            sshWs.send(JSON.stringify({type: 'input', data}));
+        }
+    });
+    sshTerm.onResize(({cols, rows}) => {
+        if (sshWs && sshWs.readyState === WebSocket.OPEN) {
+            sshWs.send(JSON.stringify({type: 'resize', cols, rows}));
+        }
+    });
+
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    sshWs = new WebSocket(`${proto}://${location.host}/ws/ssh/${encodeURIComponent(name)}?user=${encodeURIComponent(user)}`);
+
+    let gotOutput = false;
+    sshWs.onopen = () => {
+        sshSetStatus('接続中...', 'badge badge-warning');
+        sshWs.send(JSON.stringify({type: 'resize', cols: sshTerm.cols, rows: sshTerm.rows}));
+        sshTerm.focus();
+    };
+    sshWs.onmessage = e => {
+        if (!gotOutput) {
+            gotOutput = true;
+            sshSetStatus('接続済み', 'badge badge-success');
+        }
+        sshTerm.write(e.data);
+    };
+    sshWs.onclose = () => {
+        sshWs = null;
+        sshSetStatus('切断', 'badge badge-danger');
+        if (sshTerm) sshTerm.writeln('\r\n\x1b[31m[接続が閉じました]\x1b[0m');
+        sshResetButtons();
+    };
+
+    document.getElementById('btn-ssh-connect').disabled = true;
+    document.getElementById('btn-ssh-disconnect').disabled = false;
+    sshSetStatus('接続中...', 'badge badge-warning');
+}
+
+function sshDisconnect() {
+    sshCloseSocket(false);
+    sshSetStatus('切断', 'badge badge-danger');
+    if (sshTerm) sshTerm.writeln('\r\n\x1b[31m[切断しました]\x1b[0m');
+    sshResetButtons();
+}
+
+window.addEventListener('resize', () => {
+    if (sshFit && sshTerm) sshFit.fit();
+});
+
+function vmAction(name, action) {
+    if (action === 'undefine') {
+        if (!confirm('このVMを削除しますか？')) return;
+        fetch(`/api/vm/${encodeURIComponent(name)}/disks`)
+        .then(r => r.json())
+        .then(data => {
+            const deleteDisks = [];
+            if (data && data.disks && data.disks.length) {
+                for (const disk of data.disks) {
+                    if (confirm(`「${disk.name}」も削除しますか？`)) {
+                        deleteDisks.push(disk.path);
+                    }
+                }
+            }
+            const body = {action: action};
+            if (deleteDisks.length) body.delete_disks = deleteDisks;
+            return fetch(`/api/vm/${encodeURIComponent(name)}/action`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(body)
+            });
+        })
+        .then(r => r.json())
+        .then(data => {
+            if (data.error) alert('エラー: ' + data.error);
+            else location.reload();
+        })
+        .catch(err => alert('通信エラー: ' + err));
+        return;
+    }
+
+    const msgs = {destroy: '強制停止しますか？', stop: 'シャットダウンしますか？'};
+    if (msgs[action] && !confirm(msgs[action])) return;
+    fetch(`/api/vm/${name}/action`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({action: action})
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) alert('エラー: ' + data.error);
+        else location.reload();
+    })
+    .catch(err => alert('通信エラー: ' + err));
+}
+</script>
+{% endblock %}

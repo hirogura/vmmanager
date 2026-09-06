@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% block title %}イメージ→ディスク - VM Manager{% endblock %}
+{% block content %}
+<div class="action-bar">
+    <h1 style="margin:0"><i class="fas fa-hdd"></i> イメージ→ディスク</h1>
+    <span class="spacer"></span>
+</div>
+
+<div class="card" style="margin-bottom:16px">
+    <div class="card-header">
+        <h2><i class="fas fa-copy"></i> 書き込み設定</h2>
+    </div>
+    <div class="form-row">
+        <div class="form-group">
+            <label>ソース (プール内 .qcow2 / .img)</label>
+            <select id="src-select" style="width:100%"><option value="">読み込み中...</option></select>
+        </div>
+        <div class="form-group">
+            <label>ターゲット (物理デバイス)</label>
+            <select id="target-select" style="width:100%"><option value="">読み込み中...</option></select>
+        </div>
+    </div>
+    <div id="write-warn" style="display:none;background:var(--danger-bg);border:1px solid var(--danger);color:var(--danger);padding:8px;border-radius:var(--radius);margin-bottom:10px"></div>
+    <div class="btn-group">
+        <button type="button" id="btn-write" class="btn btn-danger"><i class="fas fa-fire"></i> 書き込み</button>
+        <button type="button" class="btn btn-secondary" onclick="location.reload()"><i class="fas fa-sync"></i> 再読み込み</button>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2><i class="fas fa-terminal"></i> 実行ログ</h2>
+    </div>
+    <pre id="log" style="background:var(--bg-input);color:var(--text-secondary);padding:10px;border-radius:var(--radius);overflow-x:auto;max-height:400px;min-height:80px;white-space:pre-wrap;word-break:break-all">出力はここに表示されます</pre>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+function loadSources() {
+    const sel = document.getElementById('src-select');
+    fetch('/api/storage-pool-volumes')
+        .then(r => r.json())
+        .then(vols => {
+            const imgs = vols.filter(v => /\.qcow2$/i.test(v.name) || /\.img$/i.test(v.name));
+            sel.innerHTML = '<option value="">-- イメージを選択 --</option>';
+            imgs.forEach(v => {
+                const opt = document.createElement('option');
+                opt.value = v.path;
+                opt.textContent = v.label;
+                sel.appendChild(opt);
+            });
+            if (!imgs.length) sel.innerHTML = '<option value="">qcow2/imgイメージがありません</option>';
+        })
+        .catch(() => { sel.innerHTML = '<option value="">読み込み失敗</option>'; });
+}
+
+function loadTargets() {
+    const sel = document.getElementById('target-select');
+    fetch('/api/block-devices')
+        .then(r => r.json())
+        .then(devs => {
+            const disks = devs.filter(d => d.type === 'disk');
+            sel.innerHTML = '<option value="">-- デバイスを選択 --</option>';
+            disks.forEach(d => {
+                const opt = document.createElement('option');
+                opt.value = d.path;
+                opt.textContent = d.label;
+                sel.appendChild(opt);
+            });
+            if (!disks.length) sel.innerHTML = '<option value="">物理ディスクがありません</option>';
+        })
+        .catch(() => { sel.innerHTML = '<option value="">読み込み失敗</option>'; });
+}
+
+document.getElementById('target-select').addEventListener('change', function() {
+    const warn = document.getElementById('write-warn');
+    if (this.value) {
+        warn.style.display = 'block';
+        warn.textContent = '警告: この操作は破壊的です。' + this.value + ' のデータは全て消去されます。';
+    } else {
+        warn.style.display = 'none';
+    }
+});
+
+document.getElementById('btn-write').addEventListener('click', function() {
+    const src = document.getElementById('src-select').value;
+    const tgt = document.getElementById('target-select').value;
+    if (!src) { alert('ソースを選択してください'); return; }
+    if (!tgt) { alert('ターゲットを選択してください'); return; }
+
+    const answer = prompt('本当に書き込みますか？\n\nソース: ' + src + '\nターゲット: ' + tgt + '\n\n' + tgt + ' のデータは全て消去されます。\n確認のためターゲットのパスを入力してください');
+    if (answer === null) return;
+    if (answer.trim() !== tgt) { alert('確認文字列が一致しません'); return; }
+
+    const btn = this;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 書き込み中...';
+    const log = document.getElementById('log');
+    log.textContent = '書き込みを開始しました...';
+
+    fetch('/api/image-to-disk/write', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({source: src, target: tgt})
+    })
+    .then(r => r.json())
+    .then(data => {
+        log.textContent = (data.output || '') + '\n';
+        if (data.success) {
+            log.textContent += '\n書き込みが完了しました。\nデバイスを取り外す前に sync の完了をお待ちください。';
+            alert('書き込みが完了しました');
+        } else {
+            log.textContent += '\nエラー: ' + (data.error || '不明なエラー');
+            alert('書き込みエラー: ' + (data.error || '不明なエラー'));
+        }
+    })
+    .catch(err => {
+        log.textContent = '通信エラー: ' + err;
+        alert('通信エラー: ' + err);
+    })
+    .finally(() => {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-fire"></i> 書き込み';
+    });
+});
+
+loadSources();
+loadTargets();
+</script>
+{% endblock %}

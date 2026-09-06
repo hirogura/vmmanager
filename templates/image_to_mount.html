@@ -1,0 +1,188 @@
+{% extends "base.html" %}
+{% block title %}イメージ→マウント - VM Manager{% endblock %}
+{% block content %}
+<div class="action-bar">
+    <h1 style="margin:0"><i class="fas fa-box-open"></i> イメージ→マウント</h1>
+    <span class="spacer"></span>
+    <button type="button" class="btn btn-secondary" onclick="loadStatus()"><i class="fas fa-sync"></i> 状態更新</button>
+</div>
+
+<div class="card" style="margin-bottom:16px">
+    <div class="card-header">
+        <h2><i class="fas fa-hdd"></i> マウント設定</h2>
+    </div>
+    <div class="form-group">
+        <label>イメージ (プール内 .qcow2 / .img)</label>
+        <select id="src-select" style="width:100%"><option value="">読み込み中...</option></select>
+    </div>
+    <div id="status-box" style="border:1px solid var(--border);border-radius:var(--radius);padding:10px;margin-bottom:10px">
+        <div style="display:flex;align-items:center;gap:8px">
+            <span id="status-dot" style="width:10px;height:10px;border-radius:50%;background:var(--text-muted);display:inline-block"></span>
+            <span id="status-text" style="font-weight:bold">状態を確認中...</span>
+        </div>
+        <div id="status-details" style="display:none;margin-top:8px;font-size:0.9em;line-height:1.6"></div>
+    </div>
+    <div id="msg-box" style="display:none;padding:8px;border-radius:var(--radius);margin-bottom:10px;white-space:pre-wrap"></div>
+    <div class="btn-group">
+        <button type="button" id="btn-mount" class="btn btn-success"><i class="fas fa-plug"></i> マウント</button>
+        <button type="button" id="btn-unmount" class="btn btn-warning"><i class="fas fa-plug-circle-broken"></i> アンマウント</button>
+        <button type="button" class="btn btn-secondary" onclick="loadSources()"><i class="fas fa-sync"></i> 再読み込み</button>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2><i class="fas fa-terminal"></i> 実行ログ</h2>
+    </div>
+    <pre id="log" style="background:var(--bg-input);color:var(--text-secondary);padding:10px;border-radius:var(--radius);overflow-x:auto;max-height:400px;min-height:80px;white-space:pre-wrap;word-break:break-all">出力はここに表示されます</pre>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+function loadSources() {
+    const sel = document.getElementById('src-select');
+    fetch('/api/storage-pool-volumes')
+        .then(r => r.json())
+        .then(vols => {
+            const imgs = vols.filter(v => /\.qcow2$/i.test(v.name) || /\.img$/i.test(v.name));
+            sel.innerHTML = '<option value="">-- イメージを選択 --</option>';
+            imgs.forEach(v => {
+                const opt = document.createElement('option');
+                opt.value = v.path;
+                opt.textContent = v.label;
+                sel.appendChild(opt);
+            });
+            if (!imgs.length) sel.innerHTML = '<option value="">qcow2/imgイメージがありません</option>';
+        })
+        .catch(() => { sel.innerHTML = '<option value="">読み込み失敗</option>'; });
+}
+
+function showMsg(kind, text) {
+    const box = document.getElementById('msg-box');
+    if (!text) {
+        box.style.display = 'none';
+        box.textContent = '';
+        return;
+    }
+    box.style.display = 'block';
+    box.style.background = kind === 'error' ? 'var(--danger-bg)' : 'var(--success-bg)';
+    box.style.border = kind === 'error' ? '1px solid var(--danger)' : '1px solid var(--success)';
+    box.style.color = kind === 'error' ? 'var(--danger)' : 'var(--success)';
+    box.textContent = text;
+}
+
+function loadStatus() {
+    fetch('/api/image-to-mount/status')
+        .then(r => r.json())
+        .then(s => {
+            const dot = document.getElementById('status-dot');
+            const text = document.getElementById('status-text');
+            const details = document.getElementById('status-details');
+            const mounts = s.mounts || (s.mounted ? [{mountpoint: s.mountpoint, device: s.device, fs_type: s.fs_type}] : []);
+            if (s.mounted && mounts.length) {
+                dot.style.background = 'var(--success)';
+                text.textContent = 'マウント済み (' + mounts.length + ' パーティション)';
+                const lines = ['イメージ: ' + (s.source || '-')];
+                mounts.forEach((m, i) => {
+                    lines.push((i === 0 ? 'パーティション1' : 'パーティション' + (i + 1))
+                        + ': ' + (m.device || m.partition || '-')
+                        + ' → ' + (m.mountpoint || '-')
+                        + (m.fs_type ? ' (' + m.fs_type + ')' : ''));
+                });
+                details.innerHTML = lines.map(l => '<div>' + l + '</div>').join('');
+                details.style.display = 'block';
+                document.getElementById('btn-mount').disabled = true;
+                document.getElementById('btn-unmount').disabled = false;
+            } else {
+                dot.style.background = 'var(--text-muted)';
+                text.textContent = 'アンマウント状態';
+                details.style.display = 'none';
+                document.getElementById('btn-mount').disabled = false;
+                document.getElementById('btn-unmount').disabled = true;
+            }
+        })
+        .catch(() => {
+            document.getElementById('status-dot').style.background = 'var(--danger)';
+            document.getElementById('status-text').textContent = '状態確認に失敗しました';
+        });
+}
+
+document.getElementById('btn-mount').addEventListener('click', function() {
+    const src = document.getElementById('src-select').value;
+    if (!src) { alert('イメージを選択してください'); return; }
+    const btn = this;
+    const log = document.getElementById('log');
+    log.textContent = 'マウントを開始しました...';
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> マウント中...';
+    fetch('/api/image-to-mount/mount', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({source: src})
+    })
+    .then(r => r.json())
+    .then(data => {
+        log.textContent = (data.output || '') + '\n';
+        if (data.success) {
+            log.textContent += '\nマウントに成功しました。';
+            const mounts = data.mounts || [];
+            if (mounts.length) {
+                mounts.forEach((m, i) => {
+                    log.textContent += '\n' + (i === 0 ? 'パーティション1' : 'パーティション' + (i + 1)) + ': ' + m.partition + ' → ' + m.mountpoint;
+                });
+            }
+            showMsg('success', 'マウントしました (' + (data.mount_count || mounts.length) + ' パーティション)');
+        } else {
+            log.textContent += '\nエラー: ' + (data.error || '不明なエラー');
+            showMsg('error', 'マウントエラー: ' + (data.error || '不明なエラー'));
+        }
+    })
+    .catch(err => {
+        log.textContent = '通信エラー: ' + err;
+        showMsg('error', '通信エラー: ' + err);
+    })
+    .finally(() => {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-plug"></i> マウント';
+        loadStatus();
+    });
+});
+
+document.getElementById('btn-unmount').addEventListener('click', function() {
+    if (!confirm('/opt/vm/mnt-img をアンマウントしますか？')) return;
+    const btn = this;
+    const log = document.getElementById('log');
+    log.textContent = 'アンマウントを開始しました...';
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> アンマウント中...';
+    fetch('/api/image-to-mount/unmount', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({})
+    })
+    .then(r => r.json())
+    .then(data => {
+        log.textContent = (data.output || '') + '\n';
+        if (data.success) {
+            log.textContent += '\nアンマウントに成功しました。';
+            showMsg('success', 'アンマウントしました');
+        } else {
+            log.textContent += '\nエラー: ' + (data.error || '不明なエラー');
+            showMsg('error', 'アンマウントエラー: ' + (data.error || '不明なエラー'));
+        }
+    })
+    .catch(err => {
+        log.textContent = '通信エラー: ' + err;
+        showMsg('error', '通信エラー: ' + err);
+    })
+    .finally(() => {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fas fa-plug-circle-broken"></i> アンマウント';
+        loadStatus();
+    });
+});
+
+loadSources();
+loadStatus();
+</script>
+{% endblock %}

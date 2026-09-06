@@ -1,0 +1,15 @@
+[Unit]
+Description=VM Manager Web UI
+After=libvirtd.service
+Requires=libvirtd.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/vm-manage
+ExecStart=/opt/vm-manage/venv/bin/python /opt/vm-manage/app.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

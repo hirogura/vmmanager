@@ -13,10 +13,30 @@ venv/
 *.db-journal
 *.sqlite
 *.sqlite3
+*.sql
+*.dump
 *.env
 .env.*
+!.env.example
 *.cfg
 *.conf.local
+credentials.*
+secrets.*
+.git-credentials
+
+# バックアップ / アップロードデータ
+*.backup
+*.bak
+backup/
+backups/
+data/
+uploads/
+
+# 証明書・鍵
+*.pem
+*.key
+*.p12
+*.pfx
 
 # ログ
 *.log

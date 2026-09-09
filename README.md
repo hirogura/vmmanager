@@ -14,27 +14,50 @@ libvirt / QEMU 上の仮想マシンを Web ブラウザから管理するため
 ## インストール方法
 
 インストールスクリプトを GitHub からダウンロードして、root で実行します。
+Debian/Ubuntu と Arch/CachyOS を自動判別し、パッケージ管理 (`apt` / `pacman`) を使い分けます。
 
 ```bash
-curl -fsSL -o /tmp/install-vmmanager1.sh \
-  https://raw.githubusercontent.com/hirogura/vmmanager/main/install-vmmanager1.sh
-chmod +x /tmp/install-vmmanager1.sh
-sudo /tmp/install-vmmanager1.sh
+curl -fsSL -o /tmp/install-vmmanager.sh \
+  https://raw.githubusercontent.com/hirogura/vmmanager/main/install-vmmanager.sh
+chmod +x /tmp/install-vmmanager.sh
+sudo /tmp/install-vmmanager.sh
 ```
+
+※ 旧スクリプト名 (`install-vmmanager1.sh`) でも実行できます（統合スクリプトへ転送されます）。
+
+### 対応ディストリビューション
+
+- Debian / Ubuntu 系 (`apt` を使用)
+- Arch / CachyOS 系 (`pacman` を使用。`edk2-ovmf` / `swtpm` / `dnsmasq` 等の Arch パッケージ名に対応)
+
+アプリ本体 (`app.py`) も実行時に OS 差異を自動吸収します（`/etc/os-release` による判別 + 実在ファイルの検出）:
+
+- OVMF パス: Debian (`/usr/share/OVMF/OVMF_CODE_4M*.fd`) と Arch (`/usr/share/edk2/x64/OVMF_CODE*.4m.fd`) の両方から実在ファイルを検出
+- `<seclabel model='apparmor'>`: AppArmor が有効なホストでのみ付与（CachyOS では省略し libvirt の自動付与に任せる）
+- ボリュームの所有者: `libvirt-qemu:kvm` → `libvirt-qemu:libvirt` → `qemu:kvm` → `root:kvm` の順にフォールバック
+- noVNC / websockify: `/usr/share/novnc`・`/usr/share/webapps/novnc`・`PATH` 上の `websockify` 等から自動検出
 
 ### インストールスクリプトが行うこと
 
-1. システムパッケージのインストール（Python, libvirt, QEMU, noVNC など）
-2. `libvirtd` サービスの有効化
+1. システムパッケージのインストール（Python, libvirt, QEMU, noVNC など。Arch 系では `pacman`）
+2. `libvirtd` サービスの有効化（+ 既定 NAT ネットワーク `default` の自動起動）
 3. ストレージプールの設定
+   - Btrfs 上では事前に `/opt/vm` をサブボリュームとして作成します
+     （snapper の親スナップショットから除外して肥大化を防ぐ + `chattr +C` / `compression none` で COW・圧縮を無効化し qcow2/raw の断片化を防ぐ）
+     - 既に通常ディレクトリとして存在する場合: 空なら置き換え、非空なら `/opt/vm.bak.YYYYMMDDHHMMSS` に退避してから作成します
+     - ネストしたサブボリュームのため `/etc/fstab` の追記は不要です
    - デフォルトプール `default` を `/opt/vm` に向けます（`/opt/vm` が無ければ作成します）
    - `/iso` ディレクトリが存在する場合は `iso` プールとして追加します
-4. Tailscale のインストール（未導入の場合）
+4. Tailscale のインストール（未導入の場合。Arch 系では `pacman -S tailscale`）
 5. GitHub リポジトリからアプリ本体を `/opt/vm-manage` に取得
-6. Python 仮想環境と Flask のセットアップ
-7. systemd サービス (`vm-manage.service`) の作成・起動
-8. `tailscale serve` でポート `8090` を HTTPS 公開（Tailnet 内のみ）
+6. Python 仮想環境と Flask のセットアップ（`--system-site-packages` で `libvirt` バインディングを共有）
+7. `websockify`（pip）と noVNC（Arch 系では GitHub から `/usr/share/novnc` へ配置）のセットアップ
+8. systemd サービス (`vm-manage.service`) の作成・起動
+9. `tailscale serve` でポート `8090` を HTTPS 公開（Tailnet 内のみ）
    - さらに `/websockify` を VNC コンソール（WebSocket）用に同じ `8090` 上で公開
+
+> サイドバーの「サーバアップデート」は統合スクリプト (`install-vmmanager.sh`) を再実行します。
+> 実行中のディストロは更新ログの先頭（`[distro: ...]`）で確認できます。
 
 ### アクセス方法
 
@@ -74,7 +97,10 @@ Tailscale 自体をアンインストールする場合:
 
 ```bash
 sudo tailscale logout
+# Debian/Ubuntu
 sudo apt remove -y tailscale
+# Arch/CachyOS
+sudo pacman -R tailscale
 ```
 
 ※ VM 本体（libvirt で管理されている仮想マシンやディスク）は削除されません。仮想マシン自体を削除する場合は別途 `virsh` などを使用してください。
@@ -84,7 +110,7 @@ sudo apt remove -y tailscale
 ```bash
 cd /opt/vm-manage
 python3 -m venv --system-site-packages venv
-venv/bin/pip install flask
+venv/bin/pip install flask flask-sock simple-websocket websockify
 venv/bin/python app.py   # http://127.0.0.1:8090
 ```
 

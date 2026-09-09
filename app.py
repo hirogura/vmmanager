@@ -28,6 +28,152 @@ def apply_no_cache(response):
 LIBVIRT_URI = "qemu:///system"
 
 
+# ============================================================
+# ディストリビューション差異の吸収 (Debian/Ubuntu <-> Arch/CachyOS)
+# 実行時に /etc/os-release 等から判別し、パス・権限・seclabel を切替える。
+# ============================================================
+def _detect_distro():
+    """'arch' / 'debian' / 'unknown' を返す。結果はプロセス内でキャッシュする。"""
+    cached = getattr(_detect_distro, "_cached", None)
+    if cached is not None:
+        return cached
+    result = "unknown"
+    try:
+        info = {}
+        with open("/etc/os-release", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if "=" in line and not line.startswith("#"):
+                    k, _, v = line.partition("=")
+                    info[k] = v.strip().strip('"').strip("'").lower()
+        ids = (info.get("id", "") + " " + info.get("id_like", "")).split()
+        if any(x in ("arch", "cachyos", "manjaro", "endeavouros", "garuda") for x in ids):
+            result = "arch"
+        elif any(x in ("debian", "ubuntu", "linuxmint", "pop", "raspbian", "kali") for x in ids):
+            result = "debian"
+        elif os.path.isfile("/etc/arch-release"):
+            result = "arch"
+        elif os.path.isfile("/etc/debian_version"):
+            result = "debian"
+    except OSError:
+        pass
+    _detect_distro._cached = result
+    return result
+
+
+def _has_apparmor():
+    """AppArmor が有効なホストかを返す。Debian/Ubuntu では seclabel を付与する。"""
+    if os.path.isdir("/sys/kernel/security/apparmor"):
+        return True
+    if os.path.isdir("/etc/apparmor.d"):
+        return True
+    return False
+
+
+def _seclabel_lines():
+    """AppArmor ホストでのみ seclabel 行を返す。Arch/CachyOS では libvirt の自動付与に任せる。"""
+    if _has_apparmor():
+        return ["  <seclabel type='dynamic' model='apparmor' relabel='yes'/>"]
+    return []
+
+
+def _ovmf_pair(secure):
+    """CODE/VARS の実在ペアを返す。Debian と Arch(CachyOS) の両対応。"""
+    if secure:
+        candidates = [
+            ("/usr/share/OVMF/OVMF_CODE_4M.ms.fd",
+             "/usr/share/OVMF/OVMF_VARS_4M.ms.fd"),
+            # Arch/CachyOS (edk2-ovmf)。/usr/share/OVMF は /usr/share/edk2 への symlink の場合あり
+            ("/usr/share/edk2/x64/OVMF_CODE.secboot.4m.fd",
+             "/usr/share/edk2/x64/OVMF_VARS.4m.fd"),
+            ("/usr/share/edk2-ovmf/x64/OVMF_CODE.secboot.4m.fd",
+             "/usr/share/edk2-ovmf/x64/OVMF_VARS.4m.fd"),
+            ("/usr/share/OVMF/x64/OVMF_CODE.secboot.4m.fd",
+             "/usr/share/OVMF/x64/OVMF_VARS.4m.fd"),
+        ]
+    else:
+        candidates = [
+            ("/usr/share/OVMF/OVMF_CODE_4M.fd",
+             "/usr/share/OVMF/OVMF_VARS_4M.fd"),
+            ("/usr/share/edk2/x64/OVMF_CODE.4m.fd",
+             "/usr/share/edk2/x64/OVMF_VARS.4m.fd"),
+            ("/usr/share/edk2-ovmf/x64/OVMF_CODE.4m.fd",
+             "/usr/share/edk2-ovmf/x64/OVMF_VARS.4m.fd"),
+            ("/usr/share/OVMF/x64/OVMF_CODE.4m.fd",
+             "/usr/share/OVMF/x64/OVMF_VARS.4m.fd"),
+        ]
+    for code, vars_ in candidates:
+        if os.path.isfile(code) and os.path.isfile(vars_):
+            return code, vars_
+    return None, None
+
+
+def _efi_loader_lines(vm_name, secure):
+    """UEFI 用の loader/nvram 行を返す。ファイルが無ければ空 (libvirt 自動解決に任せる)。"""
+    code, vars_ = _ovmf_pair(secure)
+    if not code:
+        return []
+    nvram = f"/var/lib/libvirt/qemu/nvram/{vm_name}_VARS.fd"
+    if secure:
+        return [
+            f"    <loader readonly='yes' secure='yes' type='pflash' format='raw'>{code}</loader>",
+            f"    <nvram template='{vars_}' templateFormat='raw' format='raw'>{nvram}</nvram>",
+        ]
+    return [
+        f"    <loader readonly='yes' type='pflash' format='raw'>{code}</loader>",
+        f"    <nvram template='{vars_}'>{nvram}</nvram>",
+    ]
+
+
+def _fix_vol_perms(path):
+    """ボリュームのパーミッション修正。Debian/Arch の所有者差異を吸収する。"""
+    import subprocess
+    for owner in ("libvirt-qemu:kvm", "libvirt-qemu:libvirt", "qemu:kvm", "root:kvm"):
+        r = subprocess.run(
+            ["chown", owner, path], capture_output=True, timeout=10
+        )
+        if r.returncode == 0:
+            break
+    subprocess.run(["chmod", "0644", path], capture_output=True, timeout=10)
+
+
+NOVNC_CANDIDATES = [
+    "/usr/share/novnc",
+    "/usr/share/webapps/novnc",
+    "/opt/vm-manage/novnc",
+]
+
+
+def _novnc_dir():
+    for d in NOVNC_CANDIDATES:
+        if os.path.isdir(d):
+            return d
+    return "/usr/share/novnc"
+
+
+def _websockify_cmd():
+    candidates = [
+        ["websockify"],
+        ["/usr/local/bin/websockify"],
+        [os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                      "venv", "bin", "websockify")],
+    ]
+    import shutil
+    for cmd in candidates:
+        if os.path.isabs(cmd[0]):
+            if os.path.isfile(cmd[0]) and os.access(cmd[0], os.X_OK):
+                return cmd
+        elif shutil.which(cmd[0]):
+            return cmd
+    return ["websockify"]
+
+
+# 統合インストールスクリプト (apt/pacman を実行時に判別)。サーバ更新機能が参照する。
+INSTALL_SCRIPT_URL = (
+    "https://raw.githubusercontent.com/hirogura/vmmanager/main/install-vmmanager.sh"
+)
+
+
 @app.errorhandler(RequestEntityTooLarge)
 def handle_too_large(e):
     return jsonify({"error": "ファイルが大きすぎます（200GB制限）"}), 413
@@ -513,8 +659,7 @@ def _build_edit_xml(config):
             lines.append("      <feature enabled='yes' name='enrolled-keys'/>")
             lines.append("      <feature enabled='yes' name='secure-boot'/>")
             lines.append("    </firmware>")
-            lines.append("    <loader readonly='yes' secure='yes' type='pflash' format='raw'>/usr/share/OVMF/OVMF_CODE_4M.ms.fd</loader>")
-            lines.append(f"    <nvram template='/usr/share/OVMF/OVMF_VARS_4M.ms.fd' templateFormat='raw' format='raw'>/var/lib/libvirt/qemu/nvram/{name}_VARS.fd</nvram>")
+            lines.extend(_efi_loader_lines(name, True))
         else:
             lines.append("  <os firmware='efi'>")
             lines.append(f"    <type arch='{arch}' machine='{machine}'>hvm</type>")
@@ -522,8 +667,7 @@ def _build_edit_xml(config):
             lines.append("      <feature enabled='no' name='enrolled-keys'/>")
             lines.append("      <feature enabled='no' name='secure-boot'/>")
             lines.append("    </firmware>")
-            lines.append("    <loader readonly='yes' type='pflash' format='raw'>/usr/share/OVMF/OVMF_CODE_4M.fd</loader>")
-            lines.append(f"    <nvram template='/usr/share/OVMF/OVMF_VARS_4M.fd'>/var/lib/libvirt/qemu/nvram/{name}_VARS.fd</nvram>")
+            lines.extend(_efi_loader_lines(name, False))
         lines.append("    <bootmenu enable='yes'/>")
     else:
         lines.append("  <os>")
@@ -736,7 +880,7 @@ def _build_edit_xml(config):
 
     lines.append("    <memballoon model='virtio'/>")
     lines.append("  </devices>")
-    lines.append("  <seclabel type='dynamic' model='apparmor' relabel='yes'/>")
+    lines.extend(_seclabel_lines())
     lines.append("</domain>")
 
     return "\n".join(lines)
@@ -993,8 +1137,7 @@ def vm_action(name):
                     if r.returncode != 0:
                         result = {"error": f"ディスク作成失敗: {r.stderr.strip()}"}
                     else:
-                        subprocess.run(["sudo", "chown", "libvirt-qemu:kvm", disk_path], capture_output=True, timeout=5)
-                        subprocess.run(["sudo", "chmod", "0644", disk_path], capture_output=True, timeout=5)
+                        _fix_vol_perms(disk_path)
                         disk_xml = f"<disk type='file' device='disk'><driver name='qemu' type='{disk_format}'/><source file='{disk_path}'/><target dev='{target_dev}' bus='{target_bus}'/></disk>"
                         with tempfile.NamedTemporaryFile(mode='w', suffix='.xml', delete=False) as f:
                             f.write(disk_xml)
@@ -1309,8 +1452,7 @@ def vm_create():
                         import subprocess as _sp
                         _sp.run(["qemu-img", "create", "-f", ffmt, fpath, size_str],
                             capture_output=True, timeout=30)
-                        _sp.run(["sudo", "chown", "libvirt-qemu:kvm", fpath], capture_output=True, timeout=5)
-                        _sp.run(["sudo", "chmod", "0644", fpath], capture_output=True, timeout=5)
+                        _fix_vol_perms(fpath)
                     dc["type"] = "file"
                     dc["source_file"] = fpath
 
@@ -1396,15 +1538,7 @@ def _create_volume(conn, vm_name, pool_name, size_gb):
     vol_path = ""
     try:
         vol_path = vol.path()
-        import subprocess
-        subprocess.run(
-            ["sudo", "chown", "libvirt-qemu:kvm", vol_path],
-            capture_output=True, timeout=5, check=True
-        )
-        subprocess.run(
-            ["sudo", "chmod", "0644", vol_path],
-            capture_output=True, timeout=5, check=True
-        )
+        _fix_vol_perms(vol_path)
     except Exception:
         pass
 
@@ -1484,8 +1618,7 @@ def _build_vm_xml(config):
             lines.append("      <feature enabled='yes' name='enrolled-keys'/>")
             lines.append("      <feature enabled='yes' name='secure-boot'/>")
             lines.append("    </firmware>")
-            lines.append("    <loader readonly='yes' secure='yes' type='pflash' format='raw'>/usr/share/OVMF/OVMF_CODE_4M.ms.fd</loader>")
-            lines.append(f"    <nvram template='/usr/share/OVMF/OVMF_VARS_4M.ms.fd' templateFormat='raw' format='raw'>/var/lib/libvirt/qemu/nvram/{name}_VARS.fd</nvram>")
+            lines.extend(_efi_loader_lines(name, True))
         else:
             lines.append("  <os firmware='efi'>")
             lines.append(f"    <type arch='{arch}' machine='{machine}'>hvm</type>")
@@ -1493,8 +1626,7 @@ def _build_vm_xml(config):
             lines.append("      <feature enabled='no' name='enrolled-keys'/>")
             lines.append("      <feature enabled='no' name='secure-boot'/>")
             lines.append("    </firmware>")
-            lines.append("    <loader readonly='yes' type='pflash' format='raw'>/usr/share/OVMF/OVMF_CODE_4M.fd</loader>")
-            lines.append(f"    <nvram template='/usr/share/OVMF/OVMF_VARS_4M.fd'>/var/lib/libvirt/qemu/nvram/{name}_VARS.fd</nvram>")
+            lines.extend(_efi_loader_lines(name, False))
         if boot_order:
             for dev in boot_order:
                 lines.append(f"    <boot dev='{dev}'/>")
@@ -1720,7 +1852,7 @@ def _build_vm_xml(config):
 
     lines.append("    <memballoon model='virtio'/>")
     lines.append("  </devices>")
-    lines.append("  <seclabel type='dynamic' model='apparmor' relabel='yes'/>")
+    lines.extend(_seclabel_lines())
     lines.append("</domain>")
 
     return "\n".join(lines), None
@@ -2064,13 +2196,15 @@ def _ensure_websockify():
     proc = _websockify_procs.get("_main")
     if proc and proc.poll() is None:
         return True
+    novnc = _novnc_dir()
+    cmd = _websockify_cmd() + [
+        "--web", novnc,
+        "--token-plugin", "TokenFile",
+        "--token-source", WEBSOCKIFY_TARGETS,
+        f"127.0.0.1:{WEBSOCKIFY_PORT}",
+    ]
     try:
-        proc = _sp.Popen(
-            ["websockify", "--web", "/usr/share/novnc/",
-             "--token-plugin", "TokenFile",
-             "--token-source", WEBSOCKIFY_TARGETS,
-             f"127.0.0.1:{WEBSOCKIFY_PORT}"],
-            stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+        proc = _sp.Popen(cmd, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
     except FileNotFoundError:
         return False
     _websockify_procs["_main"] = proc
@@ -2346,7 +2480,7 @@ def console_proxy(name):
 
     if not _ensure_websockify():
         conn.close()
-        return jsonify({"error": "websockifyがインストールされていません。 sudo apt install novnc python3-websockify"}), 500
+        return jsonify({"error": "websockify/noVNCが見つかりません。インストールスクリプトを再実行してください"}), 500
 
     _write_targets(conn)
     conn.close()
@@ -2365,7 +2499,7 @@ def vm_console(name):
 @app.route("/novnc/<path:filename>")
 def novnc_static(filename):
     from flask import send_from_directory
-    return send_from_directory("/usr/share/novnc", filename)
+    return send_from_directory(_novnc_dir(), filename)
 
 
 # ============================================================
@@ -2529,7 +2663,7 @@ def server_update():
         try:
             dl = subprocess.run(
                 ["curl", "-fsSL", "-o", script_path,
-                 "https://raw.githubusercontent.com/hirogura/vmmanager/main/install-vmmanager1.sh"],
+                 INSTALL_SCRIPT_URL],
                 capture_output=True, text=True, timeout=120,
             )
             if dl.returncode != 0:
@@ -2543,7 +2677,8 @@ def server_update():
                 capture_output=True, text=True, timeout=3600,
             )
             log = ((r.stdout or "") + "\n" + (r.stderr or "")).strip()
-            _update_state["log"] = log[-5000:]
+            # どのディストロとして実行されたか分かるよう先頭に付記する
+            _update_state["log"] = f"[distro: {_detect_distro()}]\n" + log[-5000:]
             _update_state["success"] = r.returncode == 0
         except Exception as e:
             _update_state["success"] = False
@@ -2657,8 +2792,7 @@ def api_upload():
     except Exception as e:
         return jsonify({"error": f"保存に失敗しました: {e}"}), 500
 
-    subprocess.run(["sudo", "chown", "libvirt-qemu:kvm", dest], capture_output=True, timeout=5)
-    subprocess.run(["sudo", "chmod", "0644", dest], capture_output=True, timeout=5)
+    _fix_vol_perms(dest)
 
     size = os.path.getsize(dest)
     return jsonify({

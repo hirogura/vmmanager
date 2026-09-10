@@ -203,15 +203,24 @@ def get_conn():
 
 @app.route("/")
 def index():
-    conn = get_conn()
-    vms = []
-    for dom_id in conn.listDomainsID():
-        dom = conn.lookupByID(dom_id)
-        vms.append(_vm_info(dom))
-    for name in conn.listDefinedDomains():
-        dom = conn.lookupByName(name)
-        vms.append(_vm_info(dom))
-    conn.close()
+    try:
+        conn = get_conn()
+    except libvirt.libvirtError:
+        flash("libvirtへの接続に失敗しました。libvirtdの状態を確認してください", "error")
+        return render_template("index.html", vms=[])
+    try:
+        vms = []
+        for dom_id in conn.listDomainsID():
+            dom = conn.lookupByID(dom_id)
+            vms.append(_vm_info(dom))
+        for name in conn.listDefinedDomains():
+            dom = conn.lookupByName(name)
+            vms.append(_vm_info(dom))
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
     vms.sort(key=lambda v: v["name"].lower())
     return render_template("index.html", vms=vms)
 
@@ -374,10 +383,11 @@ def vm_detail(name):
         pass
 
     machine_types = _machine_types(conn)
+    vm_summary = _vm_info(dom)
     conn.close()
     return render_template(
         "vm_detail.html",
-        vm=_vm_info(dom),
+        vm=vm_summary,
         machine_types=machine_types,
         xml=xml_str,
         devices=devices,
@@ -522,6 +532,8 @@ def vm_edit(name):
         return redirect(url_for("vm_detail", name=name))
 
     config = request.json
+    if not isinstance(config, dict):
+        return jsonify({"error": "JSONボディが必要です"}), 400
     config["name"] = name
 
     conn = get_conn()
@@ -593,8 +605,13 @@ def vm_edit(name):
 def _build_edit_xml(config):
     name = config.get("name", "")
     domain_type = config.get("domain_type", "kvm")
-    vcpus = int(config.get("vcpus", 2))
-    memory_mb = int(config.get("memory_mb", 4096))
+    try:
+        vcpus = int(config.get("vcpus", 2))
+        memory_mb = int(config.get("memory_mb", 4096))
+    except (ValueError, TypeError):
+        return None
+    if vcpus < 1 or memory_mb < 1:
+        return None
     memory_kb = memory_mb * 1024
     arch = config.get("arch", "x86_64")
     machine = config.get("machine", "pc-q35-10.2")
@@ -895,7 +912,9 @@ def vm_action(name):
         conn.close()
         return jsonify({"error": f"VM '{name}' が見つかりません"}), 404
 
-    action = request.json.get("action")
+    action = (request.json or {}).get("action")
+    payload = request.json or {}
+    result = {"success": True}
     try:
         if action == "start":
             dom.create()
@@ -908,8 +927,8 @@ def vm_action(name):
                 conn.close()
                 return jsonify({"error": "先にVMを停止してください"}), 400
 
-            delete_disk = request.json.get("delete_disk", False)
-            delete_disks = request.json.get("delete_disks") or []
+            delete_disk = payload.get("delete_disk", False)
+            delete_disks = payload.get("delete_disks") or []
             disk_paths = []
             if delete_disk or delete_disks:
                 xml_str = dom.XMLDesc(0)
@@ -960,14 +979,14 @@ def vm_action(name):
                         )
                     except Exception:
                         pass
-                try:
-                    nvram_path = f"/var/lib/libvirt/qemu/nvram/{name}_VARS.fd"
-                    subprocess.run(
-                        ["sudo", "rm", "-f", nvram_path],
-                        capture_output=True, timeout=5
-                    )
-                except Exception:
-                    pass
+            try:
+                nvram_path = f"/var/lib/libvirt/qemu/nvram/{name}_VARS.fd"
+                subprocess.run(
+                    ["sudo", "rm", "-f", nvram_path],
+                    capture_output=True, timeout=5
+                )
+            except Exception:
+                pass
         elif action == "suspend":
             dom.suspend()
         elif action == "resume":
@@ -979,8 +998,8 @@ def vm_action(name):
         elif action == "autostart_off":
             dom.setAutostart(0)
         elif action == "usb_attach":
-            vendor_id = request.json.get("vendor_id", "")
-            product_id = request.json.get("product_id", "")
+            vendor_id = payload.get("vendor_id", "")
+            product_id = payload.get("product_id", "")
             if not vendor_id or not product_id:
                 result = {"error": "vendor_id と product_id が必要です"}
             else:
@@ -1024,8 +1043,8 @@ def vm_action(name):
                     except libvirt.libvirtError as e:
                         result = {"error": str(e)}
         elif action == "usb_detach":
-            vendor_id = request.json.get("vendor_id", "")
-            product_id = request.json.get("product_id", "")
+            vendor_id = payload.get("vendor_id", "")
+            product_id = payload.get("product_id", "")
             if not vendor_id or not product_id:
                 result = {"error": "vendor_id と product_id が必要です"}
             else:
@@ -1076,7 +1095,7 @@ def vm_action(name):
                     except libvirt.libvirtError as e:
                         result = {"error": str(e)}
         elif action == "disk_attach":
-            disk_xml = request.json.get("xml", "")
+            disk_xml = payload.get("xml", "")
             if not disk_xml:
                 result = {"error": "ディスクXMLが必要です"}
             else:
@@ -1111,11 +1130,11 @@ def vm_action(name):
                 except (subprocess.TimeoutExpired, Exception) as e:
                     result = {"error": str(e)}
         elif action == "disk_create_and_attach":
-            disk_path = request.json.get("disk_path", "")
-            disk_size = request.json.get("disk_size", "")
-            disk_format = request.json.get("disk_format", "qcow2")
-            target_dev = request.json.get("target_dev", "vdb")
-            target_bus = request.json.get("target_bus", "virtio")
+            disk_path = payload.get("disk_path", "")
+            disk_size = payload.get("disk_size", "")
+            disk_format = payload.get("disk_format", "qcow2")
+            target_dev = payload.get("target_dev", "vdb")
+            target_bus = payload.get("target_bus", "virtio")
             if not disk_path or not disk_size:
                 result = {"error": "パスと容量を指定してください"}
             else:
@@ -1158,7 +1177,7 @@ def vm_action(name):
                 except (subprocess.TimeoutExpired, Exception) as e:
                     result = {"error": str(e)}
         elif action == "disk_detach":
-            target_dev = request.json.get("target_dev", "")
+            target_dev = payload.get("target_dev", "")
             if not target_dev:
                 result = {"error": "ターゲットデバイス名が必要です"}
             else:
@@ -1198,9 +1217,9 @@ def vm_action(name):
                 except libvirt.libvirtError as e:
                     result = {"error": str(e)}
         elif action == "hostdev_detach":
-            bus = request.json.get("bus", "")
-            slot = request.json.get("slot", "")
-            func = request.json.get("function", "")
+            bus = payload.get("bus", "")
+            slot = payload.get("slot", "")
+            func = payload.get("function", "")
             if not bus or not slot or not func:
                 result = {"error": "バス、スロット、ファンクションが必要です"}
             else:
@@ -1233,9 +1252,9 @@ def vm_action(name):
                 except libvirt.libvirtError as e:
                     result = {"error": str(e)}
         elif action == "hostdev_attach":
-            bus = request.json.get("bus", "")
-            slot = request.json.get("slot", "")
-            func = request.json.get("function", "")
+            bus = payload.get("bus", "")
+            slot = payload.get("slot", "")
+            func = payload.get("function", "")
             if not bus or not slot or not func:
                 result = {"error": "バス、スロット、ファンクションが必要です"}
             else:
@@ -1259,8 +1278,8 @@ def vm_action(name):
                 except libvirt.libvirtError as e:
                     result = {"error": str(e)}
         elif action == "disk_update_source":
-            target_dev = request.json.get("target_dev", "")
-            new_source = request.json.get("new_source", "")
+            target_dev = payload.get("target_dev", "")
+            new_source = payload.get("new_source", "")
             if not target_dev:
                 result = {"error": "ターゲットデバイス名が必要です"}
             elif dom.isActive():
@@ -1311,8 +1330,8 @@ def vm_action(name):
                 except libvirt.libvirtError as e:
                     result = {"error": str(e)}
         elif action == "disk_resize":
-            target_dev = request.json.get("target_dev", "")
-            new_size = request.json.get("new_size", "")
+            target_dev = payload.get("target_dev", "")
+            new_size = payload.get("new_size", "")
             if not target_dev or not new_size:
                 result = {"error": "ターゲットデバイス名と新しいサイズが必要です"}
             elif dom.isActive():
@@ -1365,7 +1384,6 @@ def vm_action(name):
         else:
             conn.close()
             return jsonify({"error": f"不明なアクション: {action}"}), 400
-        result = {"success": True}
     except libvirt.libvirtError as e:
         result = {"error": str(e)}
     conn.close()
@@ -1374,7 +1392,18 @@ def vm_action(name):
 
 @app.route("/vm/create", methods=["GET", "POST"])
 def vm_create():
-    conn = get_conn()
+    try:
+        conn = get_conn()
+    except libvirt.libvirtError:
+        flash("libvirtへの接続に失敗しました。libvirtdの状態を確認してください", "error")
+        return render_template(
+            "vm_create.html",
+            storage_pools=[],
+            networks=[],
+            hostdevs=[],
+            usb_devices=[],
+            machine_types=[],
+        )
     storage_pools = []
     for pname in conn.listStoragePools():
         pool = conn.storagePoolLookupByName(pname)
@@ -1417,6 +1446,8 @@ def vm_create():
 
     if request.method == "POST":
         config = request.json
+        if not isinstance(config, dict):
+            return jsonify({"error": "JSONボディが必要です"}), 400
         try:
             conn = get_conn()
 
@@ -1440,13 +1471,19 @@ def vm_create():
                     if fpath and fsize:
                         if not fpath.startswith("/"):
                             pool_dir = "/opt/vm"
+                            _conn = None
                             try:
                                 _conn = get_conn()
                                 _vol = _conn.storagePoolLookupByName("default").storageVolLookupByName(fpath)
                                 pool_dir = os.path.dirname(_vol.path())
-                                _conn.close()
                             except Exception:
                                 pass
+                            finally:
+                                if _conn is not None:
+                                    try:
+                                        _conn.close()
+                                    except Exception:
+                                        pass
                             fpath = os.path.join(pool_dir, fpath)
                         size_str = fsize if fsize.endswith(('G', 'M', 'K')) else f"{fsize}G"
                         import subprocess as _sp
@@ -1471,6 +1508,10 @@ def vm_create():
             conn.close()
             return jsonify({"success": True, "name": vm_name})
         except libvirt.libvirtError as e:
+            try:
+                conn.close()
+            except Exception:
+                pass
             return jsonify({"error": str(e)}), 400
 
     usb_devices = _get_usb_devices()
@@ -1488,6 +1529,8 @@ def vm_create():
 @app.route("/vm/create-xml", methods=["POST"])
 def vm_create_xml():
     data = request.json
+    if not isinstance(data, dict):
+        return jsonify({"error": "JSONボディが必要です"}), 400
     xml = data.get("xml", "").strip()
     if not xml:
         return jsonify({"error": "XMLが空です"}), 400
@@ -1514,7 +1557,7 @@ def _create_volume(conn, vm_name, pool_name, size_gb):
     try:
         pool = conn.storagePoolLookupByName(pool_name)
     except libvirt.libvirtError:
-        return
+        return ""
 
     vol_name = f"{vm_name}.qcow2"
 
@@ -1551,8 +1594,13 @@ def _build_vm_xml(config):
         return None, "VM名を入力してください"
 
     domain_type = config.get("domain_type", "kvm")
-    vcpus = int(config.get("vcpus", 2))
-    memory_mb = int(config.get("memory_mb", 4096))
+    try:
+        vcpus = int(config.get("vcpus", 2))
+        memory_mb = int(config.get("memory_mb", 4096))
+    except (ValueError, TypeError):
+        return None, "vCPU数・メモリ容量が不正です"
+    if vcpus < 1 or memory_mb < 1:
+        return None, "vCPU数・メモリ容量が不正です"
     memory_kb = memory_mb * 1024
 
     arch = config.get("arch", "x86_64")
@@ -1755,10 +1803,6 @@ def _build_vm_xml(config):
             lines.append("    </disk>")
         dev_idx += 1
 
-    has_scsi = any(dc.get("target_bus") == "scsi" for dc in disks_config)
-    if has_scsi:
-        lines.append("    <controller type='scsi' index='0' model='virtio-scsi'/>")
-
     lines.append(f"    <graphics type='vnc' port='{vnc_port}' autoport='yes' listen='{vnc_listen}'>")
     lines.append(f"      <listen type='address' address='{vnc_listen}'/>")
     lines.append("    </graphics>")
@@ -1872,7 +1916,7 @@ def vm_xml(name):
         conn.close()
         return jsonify({"xml": xml_str})
     else:
-        new_xml = request.json.get("xml", "")
+        new_xml = (request.json or {}).get("xml", "")
         try:
             conn.defineXML(new_xml)
             conn.close()
@@ -1944,7 +1988,7 @@ def vm_bootorder(name):
         conn.close()
         return jsonify({"boot_order": boot_order})
     else:
-        boot_devs = request.json.get("boot_order", [])
+        boot_devs = (request.json or {}).get("boot_order", [])
         xml_str = dom.XMLDesc(0)
         root = ET.fromstring(xml_str)
 
@@ -2444,14 +2488,19 @@ def api_vm_ip(name):
                 for line in lines[1:]:
                     parts = line.split()
                     if len(parts) >= 4:
+                        addr = parts[3]
+                        prefix = ""
+                        if "/" in addr:
+                            addr, _, prefix = addr.partition("/")
                         iface = {
                             "name": parts[0],
-                            "type": parts[1],
-                            "mac": parts[2],
-                            "ip": parts[3],
+                            "mac": parts[1],
+                            "type": parts[2],
+                            "ip": addr,
                         }
-                        if len(parts) >= 5:
-                            iface["ip"] = parts[3]
+                        if prefix:
+                            iface["prefix"] = prefix
+                        elif len(parts) >= 5:
                             iface["prefix"] = parts[4]
                         interfaces.append(iface)
         conn.close()

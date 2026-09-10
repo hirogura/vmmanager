@@ -384,6 +384,7 @@
 <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
 <script>
+const VM_NAME = {{ vm.name|tojson }};
 let newDiskCount = 0;
 let hasUnsavedChanges = false;
 const saveBtnTop = document.getElementById('save-btn-top');
@@ -523,7 +524,7 @@ function confirmAddDisk(idx) {
         if (!diskSize) { alert('容量を入力してください'); return; }
         if (!confirm(`空ディスク '${src}' (${diskSize}) を作成して追加しますか？`)) return;
         document.getElementById(`new-disk-${idx}`).remove();
-        fetch(`/api/vm/{{ vm.name }}/action`, {
+        fetch(`/api/vm/${encodeURIComponent(VM_NAME)}/action`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({action: 'disk_create_and_attach', disk_path: src, disk_size: diskSize, disk_format: driverType, target_dev: targetDev, target_bus: targetBus})
@@ -552,7 +553,7 @@ function confirmAddDisk(idx) {
     if (!confirm(`ディスク '${targetDev}' を追加しますか？`)) return;
     document.getElementById(`new-disk-${idx}`).remove();
 
-    fetch(`/api/vm/{{ vm.name }}/action`, {
+    fetch(`/api/vm/${encodeURIComponent(VM_NAME)}/action`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({action: 'disk_attach', xml: diskXml})
@@ -715,7 +716,7 @@ async function collectFormData() {
     let currentUsbs = [];
     let newUsbs = [];
     try {
-        const xmlResp = await fetch(`/api/vm/{{ vm.name }}/xml`);
+        const xmlResp = await fetch(`/api/vm/${encodeURIComponent(VM_NAME)}/xml`);
         const xmlData = await xmlResp.json();
         const doc = new DOMParser().parseFromString(xmlData.xml, 'text/xml');
         doc.querySelectorAll('hostdev[type="usb"]').forEach(hd => {
@@ -774,7 +775,7 @@ document.getElementById('vm-form').addEventListener('submit', async function(e) 
         if (src && src.value.trim()) data.iso_paths.push(src.value.trim());
     }
     if (!confirm('設定を保存しますか？')) return;
-    fetch('/vm/{{ vm.name }}/edit', {
+    fetch('/vm/' + encodeURIComponent(VM_NAME) + '/edit', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(data)
@@ -787,7 +788,7 @@ document.getElementById('vm-form').addEventListener('submit', async function(e) 
 function vmAction(action) {
     if (action === 'undefine') {
         if (!confirm('このVMを削除しますか？')) return;
-        fetch(`/api/vm/{{ vm.name }}/disks`)
+        fetch(`/api/vm/${encodeURIComponent(VM_NAME)}/disks`)
         .then(r => r.json())
         .then(data => {
             const deleteDisks = [];
@@ -800,7 +801,7 @@ function vmAction(action) {
             }
             const body = {action: action};
             if (deleteDisks.length) body.delete_disks = deleteDisks;
-            return fetch(`/api/vm/{{ vm.name }}/action`, {
+            return fetch(`/api/vm/${encodeURIComponent(VM_NAME)}/action`, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify(body)
@@ -813,7 +814,7 @@ function vmAction(action) {
     }
     const msgs = {stop:'シャットダウンしますか？',destroy:'強制停止しますか？',reboot:'再起動しますか？',suspend:'一時停止しますか？'};
     if (msgs[action] && !confirm(msgs[action])) return;
-    fetch(`/api/vm/{{ vm.name }}/action`, {
+    fetch(`/api/vm/${encodeURIComponent(VM_NAME)}/action`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({action: action})
@@ -826,7 +827,7 @@ function vmAction(action) {
 function saveXml() {
     const xml = document.getElementById('xml-editor').value;
     if (!confirm('XML設定を保存しますか？')) return;
-    fetch(`/api/vm/{{ vm.name }}/xml`, {
+    fetch(`/api/vm/${encodeURIComponent(VM_NAME)}/xml`, {
         method: 'PUT',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({xml: xml})
@@ -880,7 +881,7 @@ function detachDisk(targetDev, deviceType) {
     const label = deviceType === 'cdrom' ? 'CD-ROM' : 'ディスク';
     const note = deviceType === 'cdrom' ? '' : '（ファイル自体は残ります）';
     if (!confirm(`${label} '${targetDev}' を削除しますか？${note}`)) return;
-    fetch(`/api/vm/{{ vm.name }}/action`, {
+    fetch(`/api/vm/${encodeURIComponent(VM_NAME)}/action`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({action: 'disk_detach', target_dev: targetDev})
@@ -892,7 +893,7 @@ function detachDisk(targetDev, deviceType) {
 
 function detachHostdev(bus, slot, func) {
     if (!confirm(`PCIデバイス ${bus}:${slot}.${func} を取り外しますか？`)) return;
-    fetch(`/api/vm/{{ vm.name }}/action`, {
+    fetch(`/api/vm/${encodeURIComponent(VM_NAME)}/action`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({action: 'hostdev_detach', bus: bus, slot: slot, function: func})
@@ -909,7 +910,7 @@ function attachHostdev() {
 
     const promises = Array.from(checked).map(cb => {
         const hd = JSON.parse(cb.value);
-        return fetch(`/api/vm/{{ vm.name }}/action`, {
+        return fetch(`/api/vm/${encodeURIComponent(VM_NAME)}/action`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({action: 'hostdev_attach', bus: hd.bus, slot: hd.slot, function: hd.function})
@@ -929,7 +930,7 @@ function attachHostdev() {
 
 function ejectIso(targetDev) {
     if (!confirm(`CD-ROM '${targetDev}' のISOを取り出しますか？`)) return;
-    fetch(`/api/vm/{{ vm.name }}/action`, {
+    fetch(`/api/vm/${encodeURIComponent(VM_NAME)}/action`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({action: 'disk_update_source', target_dev: targetDev, new_source: ''})
@@ -994,7 +995,7 @@ function confirmIsoChange(targetDev) {
     const label = newSource ? 'ISOを変更' : 'ISOを取り出し';
     if (!confirm(`CD-ROM '${targetDev}' を${label}しますか？`)) return;
     document.getElementById('iso-change-modal').remove();
-    fetch(`/api/vm/{{ vm.name }}/action`, {
+    fetch(`/api/vm/${encodeURIComponent(VM_NAME)}/action`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({action: 'disk_update_source', target_dev: targetDev, new_source: newSource})
@@ -1038,7 +1039,7 @@ function confirmDiskResize(targetDev) {
     if (!newSize) { alert('拡大するサイズを入力してください'); return; }
     if (!confirm(`ディスク '${targetDev}' を ${newSize} に拡大しますか？`)) return;
     document.getElementById('disk-resize-modal').remove();
-    fetch(`/api/vm/{{ vm.name }}/action`, {
+    fetch(`/api/vm/${encodeURIComponent(VM_NAME)}/action`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({action: 'disk_resize', target_dev: targetDev, new_size: newSize})
@@ -1059,7 +1060,7 @@ function confirmDiskResize(targetDev) {
 
 function usbAttach(vid, pid, label) {
     if (!confirm(`${label} をVMに接続しますか？`)) return;
-    fetch(`/api/vm/{{ vm.name }}/action`, {
+    fetch(`/api/vm/${encodeURIComponent(VM_NAME)}/action`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({action:'usb_attach', vendor_id:vid, product_id:pid})
@@ -1071,7 +1072,7 @@ function usbAttach(vid, pid, label) {
 
 function usbDetach(vid, pid, label) {
     if (!confirm(`${label} をVMから取り外しますか？`)) return;
-    fetch(`/api/vm/{{ vm.name }}/action`, {
+    fetch(`/api/vm/${encodeURIComponent(VM_NAME)}/action`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({action:'usb_detach', vendor_id:vid, product_id:pid})
@@ -1084,7 +1085,7 @@ function usbDetach(vid, pid, label) {
 function loadUsbDevices() {
     const isActive = {{ 'true' if is_active else 'false' }};
     Promise.all([
-        fetch(`/api/vm/{{ vm.name }}/xml`).then(r=>r.json()),
+        fetch(`/api/vm/${encodeURIComponent(VM_NAME)}/xml`).then(r=>r.json()),
         fetch('/api/usb-devices').then(r=>r.json())
     ]).then(([xmlData, hostDevs]) => {
         const doc = new DOMParser().parseFromString(xmlData.xml, 'text/xml');
@@ -1131,7 +1132,7 @@ document.addEventListener('DOMContentLoaded', function() {
 function loadVmIp() {
     const el = document.getElementById('vm-ip-list');
     if (!el) return;
-    fetch(`/api/vm/{{ vm.name }}/ip`).then(r => r.json()).then(data => {
+    fetch(`/api/vm/${encodeURIComponent(VM_NAME)}/ip`).then(r => r.json()).then(data => {
         if (!data.interfaces || !data.interfaces.length) {
             el.innerHTML = '<span style="color:var(--text-muted)">取得できません</span>';
             return;
@@ -1145,7 +1146,7 @@ function loadVmIp() {
 }
 
 function loadSnapshots() {
-    fetch(`/api/vm/{{ vm.name }}/snapshots`).then(r => r.json()).then(snaps => {
+    fetch(`/api/vm/${encodeURIComponent(VM_NAME)}/snapshots`).then(r => r.json()).then(snaps => {
         const el = document.getElementById('snapshot-list');
         if (!snaps.length) {
             el.innerHTML = '<p style="color:var(--text-secondary)">スナップショットはありません</p>';
@@ -1203,7 +1204,7 @@ function confirmCreateSnapshot() {
     const desc = document.getElementById('snap-desc').value.trim();
     if (!confirm('スナップショットを作成しますか？')) return;
     document.getElementById('snapshot-create-modal').remove();
-    fetch(`/api/vm/{{ vm.name }}/snapshot-create`, {
+    fetch(`/api/vm/${encodeURIComponent(VM_NAME)}/snapshot-create`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({name: name, description: desc})
@@ -1215,7 +1216,7 @@ function confirmCreateSnapshot() {
 
 function revertSnapshot(snapName) {
     if (!confirm(`スナップショット「${snapName}」に元に戻しますか？\n現在の状態は失われます。`)) return;
-    fetch(`/api/vm/{{ vm.name }}/snapshot-revert`, {
+    fetch(`/api/vm/${encodeURIComponent(VM_NAME)}/snapshot-revert`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({name: snapName})
@@ -1227,7 +1228,7 @@ function revertSnapshot(snapName) {
 
 function deleteSnapshot(snapName) {
     if (!confirm(`スナップショット「${snapName}」を削除しますか？`)) return;
-    fetch(`/api/vm/{{ vm.name }}/snapshot-delete`, {
+    fetch(`/api/vm/${encodeURIComponent(VM_NAME)}/snapshot-delete`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({name: snapName})
@@ -1265,7 +1266,7 @@ function vmSshConnect() {
         alert('xterm.jsの読み込みに失敗しました。ネットワーク接続を確認してください。');
         return;
     }
-    const name = "{{ vm.name }}";
+    const name = VM_NAME;
     const user = document.getElementById('vm-ssh-user').value.trim() || 'root';
 
     vmSshCloseSocket(true);
@@ -1367,7 +1368,7 @@ btnVmTerminal.addEventListener('click', () => {
 <script type="module">
 import RFB from '/novnc/core/rfb.js';
 
-const vmName = "{{ vm.name }}";
+const vmName = VM_NAME;
 let vmActive = {{ 'true' if is_active else 'false' }};
 let rfb = null;
 let wsPort = null;
@@ -1445,7 +1446,7 @@ async function connectVnc() {
         if (!vmActive) { showVncStopped(); return; }
         vncContainer.innerHTML = '';
         setVncStatus('プロキシ起動中...', '#f39c12');
-        const resp = await fetch(`/api/vm/${vmName}/console-proxy`, { method: 'POST' });
+        const resp = await fetch(`/api/vm/${encodeURIComponent(vmName)}/console-proxy`, { method: 'POST' });
         const data = await resp.json();
         if (data.error) {
             setVncStatus('エラー: ' + data.error, '#e74c3c');
@@ -1455,7 +1456,7 @@ async function connectVnc() {
         wsPort = data.ws_port;
 
         setVncStatus('接続中...', '#f39c12');
-        const wsUrl = data.ws_url || `wss://${location.host}/websockify?token=${vmName}`;
+        const wsUrl = data.ws_url || `wss://${location.host}/websockify?token=${encodeURIComponent(vmName)}`;
 
         rfb = new RFB(vncContainer, wsUrl, {
             credentials: {},
@@ -1548,7 +1549,7 @@ window.connectVnc = connectVnc;
 
 const statusPoll = setInterval(async () => {
     try {
-        const resp = await fetch(`/api/vm/${vmName}/status`);
+        const resp = await fetch(`/api/vm/${encodeURIComponent(vmName)}/status`);
         const data = await resp.json();
         if (data.active && !vmActive) {
             vmActive = true;

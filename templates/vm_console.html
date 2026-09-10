@@ -51,7 +51,7 @@ body { background: #181c24; color: #e2e8f0; font-family: -apple-system, BlinkMac
 <script type="module">
 import RFB from '/novnc/core/rfb.js';
 
-const vmName = "{{ vm_name }}";
+const vmName = {{ vm_name|tojson }};
 const statusEl = document.getElementById('status');
 const loading = document.getElementById('loading');
 const btnReconnect = document.getElementById('btn-reconnect');
@@ -81,13 +81,13 @@ async function connect() {
     try {
         failCount = 0;
         setStatus('プロキシ起動中...', 'connecting');
-        const resp = await fetch(`/api/vm/${vmName}/console-proxy`, { method: 'POST' });
+        const resp = await fetch(`/api/vm/${encodeURIComponent(vmName)}/console-proxy`, { method: 'POST' });
         const data = await resp.json();
         if (data.error) { setStatus('エラー: ' + data.error, 'error'); return; }
 
         wsPort = data.ws_port;
         setStatus('接続中...', 'connecting');
-        const wsUrl = data.ws_url || `wss://${location.host}/websockify?token=${vmName}`;
+        const wsUrl = data.ws_url || `wss://${location.host}/websockify?token=${encodeURIComponent(vmName)}`;
 
         rfb = new RFB(container, wsUrl, {
             credentials: {},
@@ -149,7 +149,7 @@ function cleanup() {
 function doDisconnect() {
     clearTimeout(reconnectTimer);
     cleanup();
-    fetch(`/api/vm/${vmName}/console-proxy`, { method: 'DELETE' }).catch(() => {});
+    fetch(`/api/vm/${encodeURIComponent(vmName)}/console-proxy`, { method: 'DELETE' }).catch(() => {});
 }
 
 btnReconnect.addEventListener('click', () => {

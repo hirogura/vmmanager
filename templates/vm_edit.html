@@ -480,7 +480,7 @@ document.getElementById('edit-form').addEventListener('submit', function(e) {
 
     if (!confirm('設定を保存しますか？\n（VMの定義が更新されます）')) return;
 
-    fetch('/vm/{{ vm.name }}/edit', {
+    fetch('/vm/' + encodeURIComponent({{ vm.name|tojson }}) + '/edit', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(data)
@@ -491,7 +491,7 @@ document.getElementById('edit-form').addEventListener('submit', function(e) {
             alert('エラー: ' + result.error);
         } else {
             alert('設定を保存しました');
-            window.location.href = '/vm/{{ vm.name }}';
+            window.location.href = '/vm/' + encodeURIComponent({{ vm.name|tojson }});
         }
     })
     .catch(err => alert('通信エラー: ' + err));

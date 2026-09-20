@@ -106,9 +106,61 @@ fi
 
 echo "[2/9] libvirtd サービスを有効化中..."
 systemctl enable --now libvirtd.service
-# 既定NATネットワーク (default) があれば自動起動・起動しておく (Arch系で未起動の場合あり)
-virsh net-autostart default >/dev/null 2>&1 || true
-virsh net-start default >/dev/null 2>&1 || true
+# 既定NATネットワーク (default) のサブネット衝突を回避して自動起動・起動する。
+# ネストVM環境では外側の DHCP/NAT (例: 192.168.122.0/24) と virbr0 (既定 192.168.122.1)
+# が同サブネット・同IPになり、ゲートウェイ/DNS (192.168.122.1) への経路が壊れる。
+# virbr0 以外の NIC/ルートで使用中の /24 と衝突する場合は空きサブネットに付け替える。
+ensure_default_net() {
+    local candidates="192.168.124.1 192.168.123.1 192.168.125.1 10.20.30.1"
+    local cur_ip="" cur_net="" candidate="" net24=""
+    if virsh net-dumpxml default >/dev/null 2>&1; then
+        cur_ip=$(virsh net-dumpxml default 2>/dev/null | grep -oP "(?<=<ip address=')[^']+" | head -n1)
+    fi
+    if [ -n "${cur_ip}" ]; then
+        cur_net=$(echo "${cur_ip}" | cut -d. -f1-3).0/24
+        # virbr0 以外で同サブネットを使っていなければ現状維持
+        if ! ip -o route show | grep -v 'virbr0' | grep -q "${cur_net}" \
+            && ! ip -o addr show | grep -v 'virbr0' | grep -q "${cur_ip}/"; then
+            virsh net-autostart default >/dev/null 2>&1 || true
+            virsh net-start default >/dev/null 2>&1 || true
+            echo "  default ネットワーク: ${cur_ip} (衝突なし)"
+            return 0
+        fi
+        echo "  警告: default ネット (${cur_ip}/${cur_net}) がホスト側と衝突しています。付け替えます"
+    fi
+    for candidate in ${candidates}; do
+        net24=$(echo "${candidate}" | cut -d. -f1-3).0/24
+        if ip -o route show | grep -q "${net24}"; then
+            continue
+        fi
+        if ip -o addr show | grep -q "${candidate}/"; then
+            continue
+        fi
+        # 衝突する既存 default ネットを破棄して作り直す
+        virsh net-destroy default >/dev/null 2>&1 || true
+        virsh net-undefine default >/dev/null 2>&1 || true
+        virsh net-define /dev/stdin <<NETEOF >/dev/null
+<network>
+  <name>default</name>
+  <forward mode='nat'/>
+  <bridge name='virbr0' stp='on' delay='0'/>
+  <ip address='${candidate}' netmask='255.255.255.0'>
+    <dhcp>
+      <range start='$(echo "${candidate}" | cut -d. -f1-3).2' end='$(echo "${candidate}" | cut -d. -f1-3).254'/>
+    </dhcp>
+  </ip>
+</network>
+NETEOF
+        virsh net-autostart default >/dev/null 2>&1 || true
+        virsh net-start default >/dev/null 2>&1 || true
+        echo "  default ネットワークを ${candidate}/24 に付け替えました"
+        return 0
+    done
+    # 空き候補が無い場合は従来通り起動だけ試みる
+    virsh net-autostart default >/dev/null 2>&1 || true
+    virsh net-start default >/dev/null 2>&1 || true
+}
+ensure_default_net
 
 echo "[3/9] ストレージプールを設定中..."
 VM_DIR="/opt/vm"

@@ -194,6 +194,34 @@ NETEOF
 }
 ensure_default_net
 
+# ホストFWが libvirt ブリッジ (virbr0) からの DHCP/DNS・NAT転送を遮断しないよう例外を入れる。
+# CachyOS 実績: UFW が有効 (deny incoming/routed) だと DHCP (udp/67)・DNS (udp/53) が
+# DROP され、ゲストが IP を取得できない。lxdbr0 には例外があったが virbr0 には無かった。
+allow_virbr_firewall() {
+    local br="${1:-virbr0}"
+    # UFW (このホストの実績パターン)
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi "status: active"; then
+        if ufw status verbose 2>/dev/null | grep -q "on ${br}"; then
+            echo "  UFW: ${br} の例外は既に存在します"
+        else
+            echo "  UFW: ${br} からの入力・転送を許可します"
+            ufw allow in on "${br}" >/dev/null 2>&1 || true
+            ufw route allow in on "${br}" >/dev/null 2>&1 || true
+        fi
+    fi
+    # firewalld (CachyOS の既定FW。稼働時のみ)
+    if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
+        if firewall-cmd --zone=trusted --list-interfaces 2>/dev/null | grep -qw "${br}"; then
+            echo "  firewalld: ${br} は trusted ゾーン済みです"
+        else
+            echo "  firewalld: ${br} を trusted ゾーンに追加します"
+            firewall-cmd --permanent --zone=trusted --add-interface="${br}" >/dev/null 2>&1 || true
+            firewall-cmd --reload >/dev/null 2>&1 || true
+        fi
+    fi
+}
+allow_virbr_firewall virbr0
+
 echo "[3/9] ストレージプールを設定中..."
 VM_DIR="/opt/vm"
 # Btrfs 上では VM イメージ用に /opt/vm をサブボリューム化する (主に CachyOS 想定だが他 distro でも有効)。

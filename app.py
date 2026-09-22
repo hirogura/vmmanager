@@ -2237,14 +2237,127 @@ def api_networks():
     networks = []
     for nname in conn.listNetworks():
         net = conn.networkLookupByName(nname)
+        bridge = net.bridgeName() if net.bridgeName() else ""
+        try:
+            leases = net.DHCPLeases()
+            lease_count = len(leases)
+        except Exception:
+            lease_count = -1
         networks.append({
             "name": nname,
             "active": net.isActive(),
             "autostart": net.autostart(),
-            "bridge": net.bridgeName() if net.bridgeName() else "",
+            "bridge": bridge,
+            "dhcp_leases": lease_count,
+            "firewall_ok": _host_firewall_status(bridge).get("ok", True) if bridge else True,
         })
     conn.close()
     return jsonify(networks)
+
+
+# ============================================================
+# ホストFWと仮想NWの診断・修復
+# CachyOS 実績: UFW 有効 (deny incoming/routed) だと virbr0 からの
+# DHCP (udp/67)・DNS が DROP されゲストが IP を取得できない。
+# lxdbr0 には例外があったが virbr0 には無かったのが直接原因。
+# ============================================================
+def _host_firewall_status(bridge="virbr0"):
+    """ブリッジに対するホストFWの例外有無を返す。FW無効時は ok=True。"""
+    import subprocess
+    st = {"bridge": bridge, "ufw_active": False, "ufw_ok": True,
+          "firewalld_active": False, "firewalld_ok": True, "ok": True}
+    try:
+        r = subprocess.run(["sudo", "ufw", "status"], capture_output=True,
+                           text=True, timeout=10)
+        out = (r.stdout or "")
+        if "Status: active" in out:
+            st["ufw_active"] = True
+            # "Anywhere on virbr0" (allow in) と "ALLOW FWD ... on virbr0" (route allow) を確認
+            has_in = f"on {bridge}" in out
+            st["ufw_ok"] = has_in and ("ALLOW FWD" in out or "ALLOW FORWARD" in out or has_in)
+    except Exception:
+        pass
+    try:
+        r = subprocess.run(["sudo", "firewall-cmd", "--state"], capture_output=True,
+                           text=True, timeout=10)
+        if (r.stdout or "").strip() == "running":
+            st["firewalld_active"] = True
+            r2 = subprocess.run(
+                ["sudo", "firewall-cmd", "--zone=trusted", "--list-interfaces"],
+                capture_output=True, text=True, timeout=10)
+            st["firewalld_ok"] = bridge in (r2.stdout or "").split()
+    except Exception:
+        pass
+    st["ok"] = bool(st["ufw_ok"] and st["firewalld_ok"])
+    return st
+
+
+def _ensure_virbr_firewall(bridge="virbr0"):
+    """ブリッジに対するホストFW例外を適用する。適用内容のリストを返す (失敗しても続行)。"""
+    import subprocess
+    applied = []
+    try:
+        r = subprocess.run(["sudo", "ufw", "status"], capture_output=True,
+                           text=True, timeout=10)
+        if "Status: active" in (r.stdout or ""):
+            for args in (["sudo", "ufw", "allow", "in", "on", bridge],
+                         ["sudo", "ufw", "route", "allow", "in", "on", bridge]):
+                try:
+                    rr = subprocess.run(args, capture_output=True, text=True, timeout=30)
+                    if rr.returncode == 0:
+                        applied.append(" ".join(args[1:]))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    try:
+        r = subprocess.run(["sudo", "firewall-cmd", "--state"], capture_output=True,
+                           text=True, timeout=10)
+        if (r.stdout or "").strip() == "running":
+            r2 = subprocess.run(
+                ["sudo", "firewall-cmd", "--permanent", "--zone=trusted",
+                 f"--add-interface={bridge}"],
+                capture_output=True, text=True, timeout=30)
+            if r2.returncode == 0:
+                applied.append(f"firewall-cmd trusted --add-interface={bridge}")
+                subprocess.run(["sudo", "firewall-cmd", "--reload"],
+                               capture_output=True, timeout=60)
+    except Exception:
+        pass
+    return applied
+
+
+@app.route("/api/networks/<name>/repair", methods=["POST"])
+def api_network_repair(name):
+    """仮想NWの修復: autostart+起動とホストFW例外を適用する。"""
+    conn = get_conn()
+    try:
+        net = conn.networkLookupByName(name)
+    except libvirt.libvirtError:
+        conn.close()
+        return jsonify({"error": f"ネットワーク '{name}' が見つかりません"}), 404
+    try:
+        try:
+            net.setAutostart(1)
+        except libvirt.libvirtError:
+            pass
+        if not net.isActive():
+            net.create(0)
+        bridge = net.bridgeName() or ""
+        fw_applied = _ensure_virbr_firewall(bridge) if bridge else []
+        try:
+            lease_count = len(net.DHCPLeases())
+        except Exception:
+            lease_count = -1
+        fw = _host_firewall_status(bridge) if bridge else {"ok": True}
+        conn.close()
+        return jsonify({"success": True, "name": name, "active": True,
+                        "bridge": bridge, "dhcp_leases": lease_count,
+                        "firewall_ok": fw.get("ok", True),
+                        "firewall_applied": fw_applied})
+    except libvirt.libvirtError as e:
+        conn.close()
+        return jsonify({"error": str(e)}), 400
 
 
 _websockify_procs = {}

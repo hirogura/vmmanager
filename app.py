@@ -62,12 +62,20 @@ def _detect_distro():
 
 
 def _has_apparmor():
-    """AppArmor が有効なホストかを返す。Debian/Ubuntu では seclabel を付与する。"""
-    if os.path.isdir("/sys/kernel/security/apparmor"):
-        return True
-    if os.path.isdir("/etc/apparmor.d"):
-        return True
-    return False
+    """AppArmor が実際に有効なホストかを返す。Debian/Ubuntu では seclabel を付与する。
+    CachyOS/Arch では /etc/apparmor.d が存在してもカーネル LSM・libvirt 側が
+    AppArmor 未対応の場合があるため、ディレクトリの有無だけでは判定しない。
+    """
+    # カーネルの LSM に apparmor が含まれていなければ無効 (CachyOS 既定など)。
+    try:
+        with open("/sys/kernel/security/lsm", encoding="utf-8", errors="replace") as f:
+            if "apparmor" not in f.read().lower():
+                return False
+    except OSError:
+        pass
+    if not os.path.isdir("/sys/kernel/security/apparmor"):
+        return False
+    return True
 
 
 def _seclabel_lines():
@@ -75,6 +83,39 @@ def _seclabel_lines():
     if _has_apparmor():
         return ["  <seclabel type='dynamic' model='apparmor' relabel='yes'/>"]
     return []
+
+
+def _strip_unsupported_seclabels(xml_str):
+    """ホストが対応しない seclabel (例: apparmor 未対応ホストの model='apparmor')
+    を XML から除去して返す。既存 VM の起動エラー
+    \"セキュリティードライバーモデル 'apparmor' は利用できません\" の自動修復用。
+    対応ホスト・対応モデルは何もしない。"""
+    try:
+        root = ET.fromstring(xml_str)
+    except ET.ParseError:
+        return xml_str
+    if _has_apparmor():
+        return xml_str
+    changed = False
+    for parent in list(root.iter()):
+        for child in list(parent):
+            if child.tag == "seclabel" and (child.get("model", "") or "").lower() == "apparmor":
+                try:
+                    parent.remove(child)
+                    changed = True
+                except ValueError:
+                    pass
+    if not changed:
+        return xml_str
+    try:
+        return ET.tostring(root, encoding="unicode")
+    except Exception:
+        return xml_str
+
+
+def _define_xml(conn, xml_str):
+    """defineXML 前にホスト未対応の seclabel を除去するラッパー。"""
+    return conn.defineXML(_strip_unsupported_seclabels(xml_str))
 
 
 def _ovmf_pair(secure):
@@ -917,7 +958,18 @@ def vm_action(name):
     result = {"success": True}
     try:
         if action == "start":
-            dom.create()
+            try:
+                dom.create()
+            except libvirt.libvirtError as e:
+                # CachyOS/Arch など AppArmor 未対応ホストで、旧定義に残った
+                # <seclabel model='apparmor'> が原因の起動失敗を自動修復する。
+                if "apparmor" in str(e).lower():
+                    fixed_xml = _strip_unsupported_seclabels(dom.XMLDesc(0))
+                    _define_xml(conn, fixed_xml)
+                    dom = conn.lookupByName(name)
+                    dom.create()
+                else:
+                    raise
         elif action == "stop":
             dom.shutdown()
         elif action == "destroy":
@@ -1039,7 +1091,7 @@ def vm_action(name):
                         product_el = ET.SubElement(source_el, "product")
                         product_el.set("id", f"0x{product_id}")
                         new_xml = ET.tostring(root, encoding="unicode")
-                        conn.defineXML(new_xml)
+                        _define_xml(conn, new_xml)
                     except libvirt.libvirtError as e:
                         result = {"error": str(e)}
         elif action == "usb_detach":
@@ -1091,7 +1143,7 @@ def vm_action(name):
                             result = {"error": f"USBデバイス 0x{vendor_id}:0x{product_id} が見つかりません"}
                         else:
                             new_xml = ET.tostring(root, encoding="unicode")
-                            conn.defineXML(new_xml)
+                            _define_xml(conn, new_xml)
                     except libvirt.libvirtError as e:
                         result = {"error": str(e)}
         elif action == "disk_attach":
@@ -1212,7 +1264,7 @@ def vm_action(name):
                         else:
                             devices_el.remove(disk_el)
                             new_xml = ET.tostring(root, encoding="unicode")
-                            conn.defineXML(new_xml)
+                            _define_xml(conn, new_xml)
                             result = {"success": True}
                 except libvirt.libvirtError as e:
                     result = {"error": str(e)}
@@ -1247,7 +1299,7 @@ def vm_action(name):
                         result = {"error": "PCIデバイスが見つかりません"}
                     else:
                         new_xml = ET.tostring(root, encoding="unicode")
-                        conn.defineXML(new_xml)
+                        _define_xml(conn, new_xml)
                         result = {"success": True}
                 except libvirt.libvirtError as e:
                     result = {"error": str(e)}
@@ -1273,7 +1325,7 @@ def vm_action(name):
                         hd_el = ET.fromstring(hostdev_xml)
                         devices_el.append(hd_el)
                         new_xml = ET.tostring(root, encoding="unicode")
-                        conn.defineXML(new_xml)
+                        _define_xml(conn, new_xml)
                     result = {"success": True}
                 except libvirt.libvirtError as e:
                     result = {"error": str(e)}
@@ -1325,7 +1377,7 @@ def vm_action(name):
                         result = {"error": f"デバイス '{target_dev}' が見つかりません"}
                     else:
                         new_xml = ET.tostring(root, encoding="unicode")
-                        conn.defineXML(new_xml)
+                        _define_xml(conn, new_xml)
                         result = {"success": True}
                 except libvirt.libvirtError as e:
                     result = {"error": str(e)}
@@ -1498,7 +1550,7 @@ def vm_create():
                 conn.close()
                 return jsonify({"error": errors}), 400
 
-            conn.defineXML(xml)
+            _define_xml(conn, xml)
 
             autostart = config.get("autostart", False)
             if autostart:
@@ -1546,7 +1598,7 @@ def vm_create_xml():
 
     try:
         conn = get_conn()
-        conn.defineXML(xml)
+        _define_xml(conn, xml)
         conn.close()
         return jsonify({"success": True, "name": vm_name})
     except libvirt.libvirtError as e:
@@ -1918,7 +1970,7 @@ def vm_xml(name):
     else:
         new_xml = (request.json or {}).get("xml", "")
         try:
-            conn.defineXML(new_xml)
+            _define_xml(conn, new_xml)
             conn.close()
             return jsonify({"success": True})
         except libvirt.libvirtError as e:
@@ -2004,7 +2056,7 @@ def vm_bootorder(name):
 
         new_xml = ET.tostring(root, encoding="unicode")
         try:
-            conn.defineXML(new_xml)
+            _define_xml(conn, new_xml)
             conn.close()
             return jsonify({"success": True})
         except libvirt.libvirtError as e:

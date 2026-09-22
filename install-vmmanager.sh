@@ -59,8 +59,40 @@ if [ "${DISTRO_FAMILY}" = "unknown" ]; then
 fi
 
 echo ""
+# CachyOS/Arch: pacman のデータベースロック対策。
+# 別プロセスの pacman/pamac/yay/paru が動作中でなければ残留ロックを除去する。
+# 「データベースをロックできません」対策 (stale /var/lib/pacman/db.lck)。
+wait_for_pacman_lock() {
+    local lock="/var/lib/pacman/db.lck"
+    local waited=0
+    local max_wait=120
+    while [ -e "${lock}" ]; do
+        if pgrep -x pacman >/dev/null 2>&1 \
+            || pgrep -x pamac >/dev/null 2>&1 \
+            || pgrep -x yay >/dev/null 2>&1 \
+            || pgrep -x paru >/dev/null 2>&1 \
+            || pgrep -x packagekitd >/dev/null 2>&1; then
+            if [ "${waited}" -ge "${max_wait}" ]; then
+                echo "エラー: pacman がロック中です (${lock})。他プロセス終了後に再実行してください"
+                echo "  確認: pgrep -a pacman; pgrep -a pamac; ls -l ${lock}"
+                exit 1
+            fi
+            echo "  pacman が使用中のため待機しています... (${waited}s/${max_wait}s)"
+            sleep 5
+            waited=$((waited + 5))
+        else
+            echo "  残留ロックを検出: ${lock} (pacman プロセスなしのため削除します)"
+            rm -f "${lock}" || {
+                echo "エラー: ${lock} を削除できません"
+                exit 1
+            }
+            break
+        fi
+    done
+}
 if [ "${DISTRO_FAMILY}" = "arch" ]; then
     echo "[1/9] システムパッケージをインストール中... (pacman)"
+    wait_for_pacman_lock
     pacman -Sy --needed --noconfirm \
         python \
         python-pip \
@@ -235,6 +267,7 @@ fi
 echo "[4/9] Tailscale をインストール中..."
 if ! command -v tailscale >/dev/null 2>&1; then
     if [ "${DISTRO_FAMILY}" = "arch" ]; then
+        wait_for_pacman_lock
         pacman -S --needed --noconfirm tailscale
     else
         curl -fsSL https://tailscale.com/install.sh | sh
@@ -246,6 +279,7 @@ echo "[5/9] アプリケーションを GitHub から取得中..."
 if ! command -v git >/dev/null 2>&1; then
     echo "  git が未インストールのためインストールします..."
     if [ "${DISTRO_FAMILY}" = "arch" ]; then
+        wait_for_pacman_lock
         pacman -S --needed --noconfirm git
     else
         apt-get install -y -qq git

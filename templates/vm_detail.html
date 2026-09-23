@@ -357,6 +357,14 @@
         {% endif %}
     </div>
     {% endif %}
+
+    <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border)">
+        <div style="font-size:12px;font-weight:600;margin-bottom:6px"><i class="fas fa-desktop"></i> 単一GPU強制パススルー</div>
+        <p style="color:var(--text-muted);font-size:11px;margin:0 0 8px">ホストにGPUが1つしかない場合に、そのGPUをホストから剥がしてこのVMへ強制パススルーします。有効化するとホストの画面出力は失われます。</p>
+        <div id="single-gpu-box">
+            <p style="color:var(--text-muted);font-size:11px">読み込み中...</p>
+        </div>
+    </div>
 </div>
 
 {% if not is_active %}
@@ -927,6 +935,76 @@ function attachHostdev() {
         location.reload();
     }).catch(err => alert('通信エラー: ' + err));
 }
+
+function loadSingleGpu() {
+    const box = document.getElementById('single-gpu-box');
+    if (!box) return;
+    fetch(`/api/vm/${encodeURIComponent(VM_NAME)}/single-gpu`)
+    .then(r => r.json())
+    .then(d => {
+        if (d.error) { box.innerHTML = `<p style="color:var(--danger);font-size:11px">エラー: ${d.error}</p>`; return; }
+        const st = d.status || {};
+        const gpus = d.gpus || [];
+        const host = d.host || {};
+        const enabled = !!st.enabled;
+        const attached = !!st.attached_in_xml;
+        let html = '';
+        html += `<div style="font-size:11px;margin-bottom:6px">状態: <span class="badge ${enabled ? 'badge-success' : 'badge-info'}">${enabled ? '有効' : '無効'}</span> `;
+        html += `<span style="color:var(--text-muted)">XML割当: ${attached ? 'あり' : 'なし'} / IOMMU: ${host.iommu_enabled ? '有効' : '無効'} / vfio: ${host.vfio_loaded ? '読込済' : '未読込'}</span></div>`;
+        if (!gpus.length) {
+            html += '<p style="color:var(--text-muted);font-size:11px">ホストGPUが検出できません</p>';
+        } else {
+            html += '<div style="font-size:11px;margin-bottom:6px">ホストGPU:</div>';
+            gpus.forEach(g => {
+                const sel = (st.pci_address && st.pci_address.toLowerCase() === g.pci_address.toLowerCase()) || (!st.pci_address && g.boot_vga);
+                html += `<label class="checkbox-group" style="font-size:11px"><input type="radio" name="single_gpu_pci" value="${g.pci_address}" ${sel ? 'checked' : ''}> <span style="font-family:monospace">${g.pci_address}</span> ${g.description || ''} <span style="color:var(--text-muted)">(${g.vendor_id}:${g.product_id} / ${g.driver || 'driverなし'}${g.boot_vga ? ' / bootVGA' : ''})</span></label>`;
+            });
+            if (gpus.length === 1) {
+                html += '<div style="font-size:11px;color:var(--warning,#c90)">警告: GPUは1つだけです。有効化するとホスト画面が失われます。</div>';
+            }
+        }
+        html += '<div style="display:flex;gap:8px;margin-top:8px;align-items:center">';
+        if (!enabled) {
+            html += `<button type="button" class="btn btn-danger btn-sm" onclick="setSingleGpu(true)"><i class="fas fa-desktop"></i> 単一GPU強制パススルー有効化</button>`;
+        } else {
+            html += `<button type="button" class="btn btn-secondary btn-sm" onclick="setSingleGpu(false)">無効化 (ホストに戻す)</button>`;
+        }
+        html += `<button type="button" class="btn btn-secondary btn-sm" onclick="loadSingleGpu()"><i class="fas fa-sync-alt"></i> 更新</button>`;
+        html += '</div><div id="single-gpu-result" style="font-size:11px;margin-top:6px;color:var(--text-secondary)"></div>';
+        box.innerHTML = html;
+    })
+    .catch(err => { box.innerHTML = `<p style="color:var(--danger);font-size:11px">通信エラー: ${err}</p>`; });
+}
+
+function setSingleGpu(enable) {
+    const sel = document.querySelector('[name="single_gpu_pci"]:checked');
+    const pci = sel ? sel.value : '';
+    const msg = enable
+        ? `単一GPU (${pci || '自動'}) をホストから剥がしてこのVMへ強制パススルーします。\nホストの画面出力が失われます。続行しますか？\n※ kernel cmdline / initramfs 変更時はホスト再起動が必要です。`
+        : '単一GPU強制パススルーを無効化し、GPUをホストに戻しますか？';
+    if (!confirm(msg)) return;
+    const box = document.getElementById('single-gpu-result');
+    if (box) box.textContent = '処理中...';
+    fetch(`/api/vm/${encodeURIComponent(VM_NAME)}/single-gpu`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({action: enable ? 'enable' : 'disable', pci_address: pci})
+    })
+    .then(r => r.json())
+    .then(d => {
+        if (d.error) {
+            alert('エラー: ' + d.error + ((d.details && d.details.length) ? '\n' + d.details.join('\n') : ''));
+        } else {
+            let m = enable ? '有効化しました' : '無効化しました';
+            if (d.details && d.details.length) m += '\n' + d.details.join('\n');
+            if (d.needs_reboot) m += '\nホスト再起動が必要です。/opt/vm-gpu.md に記録済みです。';
+            alert(m);
+        }
+        loadSingleGpu();
+    })
+    .catch(err => alert('通信エラー: ' + err));
+}
+document.addEventListener('DOMContentLoaded', loadSingleGpu);
 
 function ejectIso(targetDev) {
     if (!confirm(`CD-ROM '${targetDev}' のISOを取り出しますか？`)) return;

@@ -426,6 +426,23 @@ def vm_detail(name):
     machine_types = _machine_types(conn)
     vm_summary = _vm_info(dom)
     conn.close()
+    try:
+        _sg_state = _single_gpu_load_state()
+    except Exception:
+        _sg_state = {}
+    try:
+        _sg_gpus = _get_host_gpus()
+    except Exception:
+        _sg_gpus = []
+    try:
+        _sg_host = _single_gpu_check_host()
+    except Exception:
+        _sg_host = {}
+    _sg_status = None
+    try:
+        _sg_status = _single_gpu_vm_status(name, xml_str, _sg_state)
+    except Exception:
+        _sg_status = {"enabled": bool(_sg_state.get("enabled") and _sg_state.get("vm") == name)}
     return render_template(
         "vm_detail.html",
         vm=vm_summary,
@@ -438,6 +455,9 @@ def vm_detail(name):
         is_active=is_active,
         vfio_hostdevs=vfio_hostdevs,
         host_info=host_info,
+        single_gpu_status=_sg_status,
+        host_gpus=_sg_gpus,
+        single_gpu_host=_sg_host,
     )
 
 
@@ -3666,6 +3686,817 @@ def api_image_to_mount_unmount():
     if not output:
         output.append("アンマウント完了")
     return jsonify({"success": True, "output": "\n".join(output)})
+
+
+# ============================================================
+# 単一GPU強制パススルー (Single GPU Passthrough)
+# ホストにGPUが1つしかない場合に、そのGPUをホストから剥がして
+# 指定VMへ強制的にパススルーするための機能。
+# UI: VM詳細の「PCI パススルー」カード下にある
+#     「単一GPU強制パススルー」項目から有効/無効を切替える。
+# 有効化すると:
+#  1. vfio-pci 用 modprobe / modules-load / mkinitcpio 設定を作成
+#  2. Limine の kernel cmdline に iommu + vfio-pci.ids を追記
+#  3. initramfs 再構築
+#  4. /etc/libvirt/hooks/qemu フックで VM起動時にホストの
+#     フレームバッファ/VTconsole/DM を剥がして vfio-pci にバインド
+#  5. VM定義に GPU hostdev を追加 (managed='yes')
+# kernel cmdline / initramfs 変更時はホスト再起動が必要。
+# 作業内容は /opt/vm-gpu.md に記録する。
+# ============================================================
+import glob as _glob
+import json as _json
+import re as _re
+import shutil as _shutil
+
+SINGLE_GPU_STATE_FILE = "/opt/vm-manage/single_gpu.json"
+SINGLE_GPU_LOG_FILE = "/opt/vm-gpu.md"
+
+
+def _single_gpu_log(message):
+    """作業内容を /opt/vm-gpu.md に追記する (再起動前の記録用)。"""
+    import datetime
+    try:
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        line = f"\n## {ts}\n{message}\n"
+        with open(SINGLE_GPU_LOG_FILE, "a", encoding="utf-8") as f:
+            if not os.path.isfile(SINGLE_GPU_LOG_FILE) or os.path.getsize(SINGLE_GPU_LOG_FILE) == 0:
+                f.write("# VM GPU パススルー作業記録\n")
+                f.write("ホストの単一GPUをVMへ強制パススルーする作業の記録。\n")
+            f.write(line)
+    except Exception:
+        pass
+
+
+def _single_gpu_load_state():
+    try:
+        if os.path.isfile(SINGLE_GPU_STATE_FILE):
+            with open(SINGLE_GPU_STATE_FILE, encoding="utf-8") as f:
+                data = _json.load(f)
+                return data if isinstance(data, dict) else {}
+    except Exception:
+        pass
+    return {}
+
+
+def _single_gpu_save_state(data):
+    try:
+        with open(SINGLE_GPU_STATE_FILE, "w", encoding="utf-8") as f:
+            _json.dump(data, f, indent=2, ensure_ascii=False)
+        return True
+    except Exception:
+        return False
+
+
+def _get_host_gpus():
+    """ホストのGPU一覧を返す。VGA/3D/Displayコントローラ (class 0x03xxxx)。"""
+    import subprocess
+    gpus = []
+    # lspci から説明文を取得
+    desc_map = {}
+    try:
+        r = subprocess.run(["lspci", "-nn"], capture_output=True, text=True, timeout=10)
+        for line in (r.stdout or "").splitlines():
+            m = _re.match(r"^([0-9a-fA-F:.]+)\s+(.*)$", line.strip())
+            if m:
+                desc_map[m.group(1).lower()] = m.group(2).strip()
+    except Exception:
+        pass
+    try:
+        for dev_path in sorted(_glob.glob("/sys/bus/pci/devices/*")):
+            try:
+                with open(os.path.join(dev_path, "class"), encoding="utf-8") as f:
+                    class_code = f.read().strip().lower()
+                if not class_code.startswith("0x03"):
+                    continue
+                pci_addr = os.path.basename(dev_path)  # 0000:00:01.0
+                with open(os.path.join(dev_path, "vendor"), encoding="utf-8") as f:
+                    vendor = f.read().strip().lower().replace("0x", "")
+                with open(os.path.join(dev_path, "device"), encoding="utf-8") as f:
+                    product = f.read().strip().lower().replace("0x", "")
+                driver = ""
+                try:
+                    driver = os.path.basename(os.readlink(os.path.join(dev_path, "driver")))
+                except OSError:
+                    driver = ""
+                boot_vga = ""
+                try:
+                    with open(os.path.join(dev_path, "boot_vga"), encoding="utf-8") as f:
+                        boot_vga = f.read().strip()
+                except OSError:
+                    boot_vga = ""
+                iommu_group = ""
+                try:
+                    grp = os.readlink(os.path.join(dev_path, "iommu_group"))
+                    iommu_group = os.path.basename(grp)
+                except OSError:
+                    iommu_group = ""
+                # 短表記 00:01.0
+                short = pci_addr[5:] if pci_addr.startswith("0000:") else pci_addr
+                # virsh nodedev 名
+                nodedev = "pci_" + pci_addr.replace(":", "_").replace(".", "_")
+                gpus.append({
+                    "pci_address": pci_addr,
+                    "short": short,
+                    "vendor_id": vendor,
+                    "product_id": product,
+                    "vfio_id": f"{vendor}:{product}",
+                    "driver": driver,
+                    "boot_vga": boot_vga == "1",
+                    "iommu_group": iommu_group,
+                    "nodedev": nodedev,
+                    "description": desc_map.get(short.lower(), desc_map.get(pci_addr.lower(), "")),
+                    "is_single": False,  # 後で設定
+                })
+            except Exception:
+                continue
+    except Exception:
+        pass
+    if len(gpus) == 1:
+        gpus[0]["is_single"] = True
+    else:
+        for g in gpus:
+            if g.get("boot_vga"):
+                g["is_single"] = False
+    return gpus
+
+
+def _single_gpu_check_host():
+    """IOMMU / vfio / cmdline の状態を返す。"""
+    import subprocess
+    info = {
+        "iommu_enabled": False,
+        "iommu_groups": 0,
+        "vfio_loaded": False,
+        "cmdline": "",
+        "has_iommu_param": False,
+        "has_vfio_ids": False,
+        "bootloader": "limine",
+    }
+    try:
+        with open("/proc/cmdline", encoding="utf-8") as f:
+            info["cmdline"] = f.read().strip()
+    except OSError:
+        pass
+    cl = info["cmdline"]
+    if "iommu=" in cl or "intel_iommu=on" in cl or "amd_iommu=on" in cl:
+        info["has_iommu_param"] = True
+    if "vfio-pci.ids=" in cl:
+        info["has_vfio_ids"] = True
+    try:
+        groups = [d for d in os.listdir("/sys/kernel/iommu_groups")]
+        info["iommu_groups"] = len(groups)
+        info["iommu_enabled"] = len(groups) > 0
+    except OSError:
+        info["iommu_enabled"] = False
+    try:
+        r = subprocess.run(["lsmod"], capture_output=True, text=True, timeout=5)
+        info["vfio_loaded"] = "vfio_pci" in (r.stdout or "")
+    except Exception:
+        pass
+    try:
+        if os.path.isfile("/boot/limine.conf"):
+            info["bootloader"] = "limine"
+        elif os.path.isfile("/etc/default/grub"):
+            info["bootloader"] = "grub"
+    except Exception:
+        pass
+    return info
+
+
+def _single_gpu_vm_status(vm_name, xml_str=None, state=None):
+    """VMが単一GPUパススルー有効かどうかを返す。"""
+    if state is None:
+        state = _single_gpu_load_state()
+    enabled_in_state = bool(state.get("enabled") and state.get("vm") == vm_name)
+    attached_in_xml = False
+    pci_address = state.get("pci_address", "") if isinstance(state, dict) else ""
+    try:
+        if xml_str is None:
+            conn = get_conn()
+            try:
+                dom = conn.lookupByName(vm_name)
+                xml_str = dom.XMLDesc(0)
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        if xml_str:
+            root = ET.fromstring(xml_str)
+            # state のGPUが hostdev に含まれているか
+            for hd in root.findall(".//hostdev[@type='pci']"):
+                addr = hd.find("source/address")
+                if addr is not None:
+                    d = addr.get("domain", "0x0000")
+                    b = addr.get("bus", "")
+                    s = addr.get("slot", "")
+                    fn = addr.get("function", "")
+                    full = f"{d.replace('0x','').zfill(4)}:{b.replace('0x','')}:{s.replace('0x','')}.{fn.replace('0x','')}"
+                    if pci_address and full.lower() == pci_address.lower():
+                        attached_in_xml = True
+                        break
+                    # stateが無い場合でも何らかのpci hostdevがあれば参考表示
+            if not pci_address:
+                attached_in_xml = len(root.findall(".//hostdev[@type='pci']")) > 0
+    except Exception:
+        pass
+    return {
+        "enabled": enabled_in_state,
+        "attached_in_xml": attached_in_xml,
+        "vm": vm_name,
+        "pci_address": pci_address,
+        "state": state,
+    }
+
+
+def _single_gpu_write_limine_dropin(extra_params):
+    """CachyOS の limine-entry-tool 用 drop-in を書き、再生成後も
+    kernel cmdline が維持されるようにする。
+    戻り値: (changed: bool, details: [str])"""
+    details = []
+    dropin_dir = "/etc/limine-entry-tool.d"
+    dropin_path = os.path.join(dropin_dir, "vfio-single-gpu.conf")
+    if not (_shutil.which("limine-entry-tool") or os.path.isfile("/usr/sbin/limine-entry-tool")):
+        return False, ["limine-entry-tool が無いため drop-in は不要"]
+    try:
+        os.makedirs(dropin_dir, exist_ok=True)
+    except OSError as e:
+        return False, [f"drop-in ディレクトリ作成失敗: {e}"]
+    content = (
+        "# single-gpu passthrough (vm-manage が自動生成)\n"
+        "# limine.conf は mkinitcpio/limine-mkinitcpio 実行時に再生成されるため、\n"
+        "# 直接編集ではなくこの drop-in で kernel cmdline を維持する。\n"
+        f"KERNEL_CMDLINE[default]+={' '.join(extra_params)}\n"
+    )
+    old = ""
+    try:
+        with open(dropin_path, encoding="utf-8") as f:
+            old = f.read()
+    except OSError:
+        pass
+    if old == content:
+        return False, [f"設定済み: {dropin_path}"]
+    try:
+        with open(dropin_path, "w", encoding="utf-8") as f:
+            f.write(content)
+    except OSError as e:
+        return False, [f"drop-in 書き込み失敗: {e}"]
+    details.append(f"作成/更新: {dropin_path} ({' '.join(extra_params)})")
+    return True, details
+
+
+def _single_gpu_rebuild_boot():
+    """initramfs 再構築 + limine エントリ再生成を行う。
+    CachyOS では limine-mkinitcpio が両方を行う。戻り値: (ok, details[])"""
+    import subprocess
+    details = []
+    # limine-mkinitcpio があればそれを優先 (initramfs + limine.conf 再生成)
+    builders = []
+    if _shutil.which("limine-mkinitcpio") or os.path.isfile("/usr/sbin/limine-mkinitcpio"):
+        builders.append(["limine-mkinitcpio"])
+    builders.append(["mkinitcpio", "-P"])
+    last_err = ""
+    for cmd in builders:
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=1200)
+            tail = ((r.stdout or "") + (r.stderr or ""))[-800:]
+            if r.returncode == 0:
+                details.append(f"ブート再構築: 成功 ({' '.join(cmd)})")
+                return True, details
+            last_err = f"{' '.join(cmd)} rc={r.returncode}: {tail[-300:]}"
+        except FileNotFoundError:
+            last_err = f"{' '.join(cmd)} が見つかりません"
+            continue
+        except Exception as e:
+            last_err = f"{' '.join(cmd)} エラー: {e}"
+    details.append(f"ブート再構築: 失敗 ({last_err})。手動で initramfs 再構築・再起動してください。")
+    return False, details
+
+
+def _single_gpu_update_limine_cmdline(extra_params):
+    """Limine の全 kernel エントリの cmdline に不足パラメータを追記する。
+    戻り値: (changed: bool, details: [str])"""
+    details = []
+    path = "/boot/limine.conf"
+    if not os.path.isfile(path):
+        return False, ["limine.conf が見つかりません: " + path]
+    try:
+        with open(path, encoding="utf-8") as f:
+            original = f.read()
+    except OSError as e:
+        return False, [f"limine.conf 読み込み失敗: {e}"]
+    lines = original.splitlines(True)
+    changed = False
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("cmdline:"):
+            prefix = line[:line.index("cmdline:") + len("cmdline:")]
+            cur = stripped[len("cmdline:"):].strip()
+            tokens = cur.split()
+            added = []
+            for p in extra_params:
+                key = p.split("=")[0]
+                # vfio-pci.ids= は値マージ、それ以外はキー存在チェック
+                if key == "vfio-pci.ids":
+                    found = [t for t in tokens if t.startswith("vfio-pci.ids=")]
+                    if found:
+                        cur_ids = found[0].split("=", 1)[1]
+                        new_ids = [x for x in p.split("=", 1)[1].split(",") if x and x not in cur_ids.split(",")]
+                        if new_ids:
+                            tokens[tokens.index(found[0])] = found[0] + "," + ",".join(new_ids)
+                            added.append("vfio-pci.ids へ " + ",".join(new_ids) + " を追加")
+                    else:
+                        tokens.append(p)
+                        added.append(p)
+                else:
+                    if not any(t == p or t.startswith(key + "=") for t in tokens):
+                        tokens.append(p)
+                        added.append(p)
+            if added:
+                lines[i] = prefix + " " + " ".join(tokens) + "\n"
+                changed = True
+                details.append(f"limine cmdline に追加: {', '.join(added)}")
+    if not changed:
+        return False, ["kernel cmdline は既に設定済みのため変更なし"]
+    # バックアップして書き込み
+    import datetime
+    bak = path + ".bak." + datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+    try:
+        _shutil.copy2(path, bak)
+        details.append(f"バックアップ: {bak}")
+        with open(path, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+    except OSError as e:
+        return False, [f"limine.conf 書き込み失敗: {e}"]
+    return True, details
+
+
+def _single_gpu_ensure_host_config(gpu):
+    """vfio 関連のホスト設定を行う。戻り値: (needs_reboot, details[])"""
+    import subprocess
+    details = []
+    needs_reboot = False
+    vfio_id = gpu.get("vfio_id", "")
+    # 1. modprobe.d
+    try:
+        os.makedirs("/etc/modprobe.d", exist_ok=True)
+        modprobe_path = "/etc/modprobe.d/vfio-single-gpu.conf"
+        content = (
+            "# single-gpu passthrough (vm-manage が自動生成)\n"
+            f"options vfio-pci ids={vfio_id} disable_vga=1\n"
+            "softdep virtio-pci pre: vfio-pci\n"
+        )
+        old = ""
+        try:
+            with open(modprobe_path, encoding="utf-8") as f:
+                old = f.read()
+        except OSError:
+            pass
+        if old != content:
+            with open(modprobe_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            details.append(f"作成/更新: {modprobe_path} (ids={vfio_id})")
+            needs_reboot = True
+        else:
+            details.append(f"設定済み: {modprobe_path}")
+    except OSError as e:
+        details.append(f"modprobe 設定失敗: {e}")
+    # 2. modules-load.d
+    try:
+        os.makedirs("/etc/modules-load.d", exist_ok=True)
+        load_path = "/etc/modules-load.d/vfio.conf"
+        content = "vfio\nvfio_iommu_type1\nvfio_pci\n"
+        old = ""
+        try:
+            with open(load_path, encoding="utf-8") as f:
+                old = f.read()
+        except OSError:
+            pass
+        if old != content:
+            with open(load_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            details.append(f"作成/更新: {load_path}")
+            needs_reboot = True
+        else:
+            details.append(f"設定済み: {load_path}")
+    except OSError as e:
+        details.append(f"modules-load 設定失敗: {e}")
+    # 3. mkinitcpio drop-in (vfio を早期ロード)
+    try:
+        os.makedirs("/etc/mkinitcpio.conf.d", exist_ok=True)
+        mk_path = "/etc/mkinitcpio.conf.d/20-vfio-single-gpu.conf"
+        content = "MODULES+=(vfio vfio_pci vfio_iommu_type1)\n"
+        old = ""
+        try:
+            with open(mk_path, encoding="utf-8") as f:
+                old = f.read()
+        except OSError:
+            pass
+        if old != content:
+            with open(mk_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            details.append(f"作成/更新: {mk_path}")
+            needs_reboot = True
+        else:
+            details.append(f"設定済み: {mk_path}")
+    except OSError as e:
+        details.append(f"mkinitcpio 設定失敗: {e}")
+    # 4. kernel cmdline (AMD CPU なので amd_iommu + iommu=pt。Intel 混在に備え両方入れても無害)
+    cpu_vendor = ""
+    try:
+        with open("/proc/cpuinfo", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("vendor_id"):
+                    cpu_vendor = line.split(":")[1].strip().lower()
+                    break
+    except OSError:
+        pass
+    if "amd" in cpu_vendor:
+        iommu_params = ["amd_iommu=on", "iommu=pt"]
+    elif "intel" in cpu_vendor:
+        iommu_params = ["intel_iommu=on", "iommu=pt"]
+    else:
+        iommu_params = ["amd_iommu=on", "intel_iommu=on", "iommu=pt"]
+    extra = iommu_params + [f"vfio-pci.ids={vfio_id}"]
+    # CachyOS/Limine では entry-tool の再生成で limine.conf が上書きされるため、
+    # 永続化は drop-in で行う。直接編集はフォールバック (非Limine環境向け)。
+    dropin_changed, d_drop = _single_gpu_write_limine_dropin(extra)
+    details.extend(d_drop)
+    if dropin_changed:
+        needs_reboot = True
+    changed, d = _single_gpu_update_limine_cmdline(extra)
+    details.extend(d)
+    if changed:
+        needs_reboot = True
+    # 5. initramfs 再構築 + limine エントリ再生成 (設定変更時のみ)
+    if needs_reboot:
+        ok, d = _single_gpu_rebuild_boot()
+        details.extend(d)
+        if ok:
+            # 再生成後の limine.conf を確認
+            try:
+                with open("/boot/limine.conf", encoding="utf-8") as f:
+                    lim = f.read()
+                if "vfio-pci.ids=" in lim:
+                    details.append("確認: 再生成後の limine.conf に vfio-pci.ids が含まれています")
+                else:
+                    details.append("注意: 再生成後の limine.conf に vfio-pci.ids が見当たりません (要確認)")
+            except OSError as e:
+                details.append(f"limine.conf 確認失敗: {e}")
+    else:
+        details.append("initramfs 再構築: 不要 (設定変更なし)")
+    return needs_reboot, details
+
+
+def _single_gpu_write_hook(vm_name, gpu):
+    """VM起動/停止時にGPUを剥がし・戻す libvirt qemu フックを作成する。"""
+    pci = gpu.get("pci_address", "")
+    nodedev = gpu.get("nodedev", "")
+    hook_dir = "/etc/libvirt/hooks"
+    hook_path = os.path.join(hook_dir, "qemu")
+    try:
+        os.makedirs(hook_dir, exist_ok=True)
+    except OSError as e:
+        return False, f"フックディレクトリ作成失敗: {e}"
+    script = f"""#!/bin/bash
+# single-gpu passthrough hook (vm-manage が自動生成)
+# 対象VM: {vm_name} / GPU: {pci} ({gpu.get('vfio_id','')})
+OBJECT="$1"
+OPERATION="$2"
+SUBOP="$3"
+EXTRA="$4"
+TARGET_VM="{vm_name}"
+GPU_PCI="{pci}"
+GPU_NODEDEV="{nodedev}"
+if [ "$OBJECT" != "$TARGET_VM" ]; then
+  exit 0
+fi
+log() {{ logger -t single-gpu-hook "$1"; echo "$1" >> /var/log/single-gpu-hook.log; }}
+detach_gpu() {{
+  log "detaching $GPU_PCI for $TARGET_VM"
+  # フレームバッファ/VTconsole を剥がす (存在するものだけ)
+  echo 0 > /sys/class/vtconsole/vtcon0/bind 2>/dev/null || true
+  echo 0 > /sys/class/vtconsole/vtcon1/bind 2>/dev/null || true
+  echo efi-framebuffer.0 > /sys/bus/platform/drivers/efi-framebuffer/unbind 2>/dev/null || true
+  # ディスプレイマネージャ停止 (存在すれば)
+  for dm in sddm gdm lightdm lxdm xdm; do
+    if systemctl is-active --quiet "$dm" 2>/dev/null; then
+      systemctl stop "$dm" 2>/dev/null || true
+    fi
+  done
+  sleep 1
+  # ドライバから切り離して vfio-pci へ
+  virsh nodedev-detach "$GPU_NODEDEV" 2>/dev/null || true
+  modprobe vfio-pci 2>/dev/null || true
+}}
+attach_gpu() {{
+  log "re-attaching $GPU_PCI after $TARGET_VM"
+  virsh nodedev-reattach "$GPU_NODEDEV" 2>/dev/null || true
+  echo 1 > /sys/class/vtconsole/vtcon0/bind 2>/dev/null || true
+  echo 1 > /sys/class/vtconsole/vtcon1/bind 2>/dev/null || true
+  echo efi-framebuffer.0 > /sys/bus/platform/drivers/efi-framebuffer/bind 2>/dev/null || true
+  for dm in sddm gdm lightdm lxdm xdm; do
+    if systemctl is-enabled --quiet "$dm" 2>/dev/null; then
+      systemctl start "$dm" 2>/dev/null || true
+      break
+    fi
+  done
+}}
+case "$OPERATION" in
+  prepare|migrate|restore)
+    if [ "$SUBOP" = "begin" ] || [ -z "$SUBOP" ]; then
+      detach_gpu
+    fi
+    ;;
+  release|stopped)
+    if [ "$SUBOP" = "end" ] || [ -z "$SUBOP" ] || [ "$OPERATION" = "stopped" ]; then
+      attach_gpu
+    fi
+    ;;
+esac
+exit 0
+"""
+    try:
+        old = ""
+        try:
+            with open(hook_path, encoding="utf-8") as f:
+                old = f.read()
+        except OSError:
+            pass
+        with open(hook_path, "w", encoding="utf-8") as f:
+            f.write(script)
+        os.chmod(hook_path, 0o755)
+        # libvirtd にフック再読込させる
+        import subprocess
+        subprocess.run(["systemctl", "restart", "libvirtd"], capture_output=True, timeout=60)
+        action = "更新" if old else "作成"
+        return True, f"{action}: {hook_path} (対象VM={vm_name}, GPU={pci})"
+    except OSError as e:
+        return False, f"フック書き込み失敗: {e}"
+
+
+def _single_gpu_attach_xml(vm_name, gpu):
+    """VM定義にGPU hostdevを追加する (VM停止中のみ)。既存の同アドレスは置換。"""
+    pci = gpu.get("pci_address", "")  # 0000:00:01.0
+    m = _re.match(r"^([0-9a-fA-F]{4}):([0-9a-fA-F]{2}):([0-9a-fA-F]{2})\.([0-9a-fA-F])$", pci)
+    if not m:
+        return False, f"PCIアドレス形式が不正: {pci}"
+    domain, bus, slot, func = m.group(1), m.group(2), m.group(3), m.group(4)
+    domain_x = "0x" + domain.lower()
+    bus_x = "0x" + bus.lower()
+    slot_x = "0x" + slot.lower()
+    func_x = "0x" + func.lower()
+    conn = get_conn()
+    try:
+        try:
+            dom = conn.lookupByName(vm_name)
+        except libvirt.libvirtError:
+            return False, f"VM '{vm_name}' が見つかりません"
+        if dom.isActive():
+            return False, "VMを停止してから有効化してください"
+        xml_str = dom.XMLDesc(0)
+        root = ET.fromstring(xml_str)
+        devices_el = root.find("devices")
+        if devices_el is None:
+            return False, "VM XMLに <devices> がありません"
+        # 同じGPUの既存 hostdev を除去 (重複防止)
+        removed = 0
+        for hd in list(root.findall(".//hostdev[@type='pci']")):
+            addr = hd.find("source/address")
+            if addr is not None and (addr.get("bus", "").lower() == bus_x
+                    and addr.get("slot", "").lower() == slot_x
+                    and addr.get("function", "").lower() == func_x):
+                try:
+                    devices_el.remove(hd)
+                    removed += 1
+                except ValueError:
+                    pass
+        # 収集: 同スロットのオーディオ機能 (.1 等、class 0x04) も一緒に渡すと音が出る
+        extra_funcs = []
+        try:
+            base_slot = f"0000:{bus}:{slot}"
+            for dev_path in _glob.glob("/sys/bus/pci/devices/*"):
+                name = os.path.basename(dev_path)
+                if name.startswith(base_slot + ".") and name != pci:
+                    try:
+                        with open(os.path.join(dev_path, "class"), encoding="utf-8") as f:
+                            cc = f.read().strip().lower()
+                        fn = name.split(".")[-1]
+                        extra_funcs.append(fn)
+                        # 既存の同アドレス hostdev も除去
+                        for hd in list(root.findall(".//hostdev[@type='pci']")):
+                            addr = hd.find("source/address")
+                            if addr is not None and (addr.get("bus", "").lower() == bus_x
+                                    and addr.get("slot", "").lower() == slot_x
+                                    and addr.get("function", "").lower() == ("0x" + fn)):
+                                try:
+                                    devices_el.remove(hd)
+                                except ValueError:
+                                    pass
+                    except OSError:
+                        pass
+        except Exception:
+            pass
+        funcs = [func_x] + [("0x" + f) for f in sorted(set(extra_funcs))]
+        for fx in funcs:
+            hd_el = ET.SubElement(devices_el, "hostdev")
+            hd_el.set("mode", "subsystem")
+            hd_el.set("type", "pci")
+            hd_el.set("managed", "yes")
+            src = ET.SubElement(hd_el, "source")
+            addr = ET.SubElement(src, "address")
+            addr.set("domain", domain_x)
+            addr.set("bus", bus_x)
+            addr.set("slot", slot_x)
+            addr.set("function", fx)
+        # NVIDIA対策の kvm hidden + ioapic (他GPUには無害)
+        feats = root.find("features")
+        if feats is None:
+            feats = ET.SubElement(root, "features")
+        kvm_el = feats.find("kvm")
+        if kvm_el is None:
+            kvm_el = ET.SubElement(feats, "kvm")
+        hidden = kvm_el.find("hidden")
+        if hidden is None:
+            hidden = ET.SubElement(kvm_el, "hidden")
+        hidden.set("state", "on")
+        if feats.find("ioapic") is None:
+            ioapic = ET.SubElement(feats, "ioapic")
+            ioapic.set("driver", "kvm")
+        new_xml = ET.tostring(root, encoding="unicode")
+        _define_xml(conn, new_xml)
+        return True, f"VM定義にGPU hostdev を追加: {pci} (+同スロット機能 {len(funcs)-1}件、重複除去 {removed}件)"
+    except libvirt.libvirtError as e:
+        return False, f"VM定義更新失敗: {e}"
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _single_gpu_detach_xml(vm_name, pci_address=""):
+    """VM定義から単一GPU hostdev を除去する (VM停止中のみ)。"""
+    conn = get_conn()
+    try:
+        try:
+            dom = conn.lookupByName(vm_name)
+        except libvirt.libvirtError:
+            return False, f"VM '{vm_name}' が見つかりません"
+        if dom.isActive():
+            return False, "VMを停止してから無効化してください"
+        xml_str = dom.XMLDesc(0)
+        root = ET.fromstring(xml_str)
+        devices_el = root.find("devices")
+        if devices_el is None:
+            return False, "VM XMLに <devices> がありません"
+        removed = 0
+        if pci_address:
+            m = _re.match(r"^([0-9a-fA-F]{4}):([0-9a-fA-F]{2}):([0-9a-fA-F]{2})\.([0-9a-fA-F])$", pci_address)
+            if m:
+                bus_x = "0x" + m.group(2).lower()
+                slot_x = "0x" + m.group(3).lower()
+                for hd in list(root.findall(".//hostdev[@type='pci']")):
+                    addr = hd.find("source/address")
+                    if addr is not None and addr.get("bus", "").lower() == bus_x and addr.get("slot", "").lower() == slot_x:
+                        try:
+                            devices_el.remove(hd)
+                            removed += 1
+                        except ValueError:
+                            pass
+        else:
+            for hd in list(root.findall(".//hostdev[@type='pci']")):
+                try:
+                    devices_el.remove(hd)
+                    removed += 1
+                except ValueError:
+                    pass
+        if removed == 0:
+            return True, "除去対象のGPU hostdev はありませんでした"
+        new_xml = ET.tostring(root, encoding="unicode")
+        _define_xml(conn, new_xml)
+        return True, f"VM定義からGPU hostdev を除去: {removed}件"
+    except libvirt.libvirtError as e:
+        return False, f"VM定義更新失敗: {e}"
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+@app.route("/api/host-gpus")
+def api_host_gpus():
+    return jsonify({"gpus": _get_host_gpus(), "host": _single_gpu_check_host()})
+
+
+@app.route("/api/vm/<name>/single-gpu")
+def api_single_gpu_status(name):
+    try:
+        conn = get_conn()
+        try:
+            dom = conn.lookupByName(name)
+            xml_str = dom.XMLDesc(0)
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except libvirt.libvirtError:
+        return jsonify({"error": f"VM '{name}' が見つかりません"}), 404
+    state = _single_gpu_load_state()
+    return jsonify({
+        "status": _single_gpu_vm_status(name, xml_str, state),
+        "gpus": _get_host_gpus(),
+        "host": _single_gpu_check_host(),
+    })
+
+
+@app.route("/api/vm/<name>/single-gpu", methods=["POST"])
+def api_single_gpu_set(name):
+    data = request.json or {}
+    action = (data.get("action") or "").strip().lower()
+    req_addr = (data.get("pci_address") or "").strip()
+    if action not in ("enable", "disable"):
+        return jsonify({"error": "action は enable/disable を指定してください"}), 400
+    gpus = _get_host_gpus()
+    if not gpus:
+        return jsonify({"error": "ホストにGPUが見つかりません (VGAクラス devices なし)"}), 400
+    gpu = None
+    if req_addr:
+        for g in gpus:
+            if g["pci_address"].lower() == req_addr.lower() or g["short"].lower() == req_addr.lower():
+                gpu = g
+                break
+        if gpu is None:
+            return jsonify({"error": f"指定GPUが見つかりません: {req_addr}"}), 400
+    else:
+        # 既定: boot_vga のもの、なければ最初の1つ (単一GPU想定)
+        for g in gpus:
+            if g.get("boot_vga"):
+                gpu = g
+                break
+        if gpu is None:
+            gpu = gpus[0]
+    details = []
+    if action == "enable":
+        if len(gpus) == 1:
+            details.append(f"注意: ホストGPUは1つだけです ({gpu['pci_address']} {gpu['description']})。有効化するとホストの画面出力が失われます。SSH等での操作を推奨します。")
+        # VM存在確認
+        conn = get_conn()
+        try:
+            try:
+                dom = conn.lookupByName(name)
+            except libvirt.libvirtError:
+                return jsonify({"error": f"VM '{name}' が見つかりません"}), 404
+            if dom.isActive():
+                return jsonify({"error": "VMを停止してから有効化してください (強制パススルーは停止中のみ設定可能)"}), 400
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        # 1. ホスト設定
+        needs_reboot_host, d1 = _single_gpu_ensure_host_config(gpu)
+        details.extend(d1)
+        # 2. フック
+        ok_hook, d2 = _single_gpu_write_hook(name, gpu)
+        details.append(d2)
+        if not ok_hook:
+            _single_gpu_log(f"単一GPU強制パススルー有効化 (VM={name}, GPU={gpu['pci_address']}): フック失敗\n" + "\n".join(f"- {x}" for x in details))
+            return jsonify({"error": d2, "details": details}), 500
+        # 3. VM定義
+        ok_xml, d3 = _single_gpu_attach_xml(name, gpu)
+        details.append(d3)
+        if not ok_xml:
+            _single_gpu_log(f"単一GPU強制パススルー有効化 (VM={name}, GPU={gpu['pci_address']}): VM定義失敗\n" + "\n".join(f"- {x}" for x in details))
+            return jsonify({"error": d3, "details": details}), 400
+        state = {
+            "enabled": True,
+            "vm": name,
+            "pci_address": gpu["pci_address"],
+            "vfio_id": gpu.get("vfio_id", ""),
+            "nodedev": gpu.get("nodedev", ""),
+        }
+        _single_gpu_save_state(state)
+        _single_gpu_log(
+            f"単一GPU強制パススルー有効化 (VM={name}, GPU={gpu['pci_address']} {gpu.get('description','')} / ids={gpu.get('vfio_id','')})\n"
+            + "\n".join(f"- {x}" for x in details)
+            + f"\n- needs_reboot={needs_reboot_host}"
+            + ("\n- ホスト再起動が必要です (kernel cmdline / initramfs 変更のため)" if needs_reboot_host else "\n- 再起動不要")
+        )
+        return jsonify({"success": True, "enabled": True, "needs_reboot": needs_reboot_host, "gpu": gpu, "details": details})
+    else:
+        state = _single_gpu_load_state()
+        pci = state.get("pci_address", "") if state.get("vm") == name else req_addr
+        ok_xml, d1 = _single_gpu_detach_xml(name, pci)
+        details.append(d1)
+        if not ok_xml:
+            return jsonify({"error": d1, "details": details}), 400
+        _single_gpu_save_state({"enabled": False, "vm": name, "pci_address": pci})
+        _single_gpu_log(f"単一GPU強制パススルー無効化 (VM={name}, GPU={pci})\n" + "\n".join(f"- {x}" for x in details))
+        return jsonify({"success": True, "enabled": False, "details": details})
 
 
 if __name__ == "__main__":

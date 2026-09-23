@@ -95,6 +95,40 @@ wait_for_pacman_lock() {
 # が中断したまま再実行すると [1/9] で下記エラーになる:
 #   E: dpkg was interrupted, you must manually run 'sudo dpkg --configure -a'
 # を自動修復する。Arch 側の wait_for_pacman_lock と対になる処理。
+# ロックファイルを実際に掴んでいるプロセスがあれば 0 を返す。
+# fuser/lsof が無い環境でも動作する。アイドル中の packagekitd 等は
+# ロックを保持していないため待機対象にならない (v.1.5.6)。
+apt_lock_held() {
+    local pid locks
+    for pid in $(ls /proc 2>/dev/null | grep -E '^[0-9]+$'); do
+        [ "${pid}" = "$$" ] && continue
+        locks=$(ls -l "/proc/${pid}/fd" 2>/dev/null) || continue
+        case "${locks}" in
+            *"/var/lib/dpkg/lock"*|*"/var/lib/apt/lists/lock"*|*"/var/cache/apt/archives/lock"*) return 0 ;;
+        esac
+    done
+    return 1
+}
+# unattended-upgrades の shutdown 待機ヘルパー (--wait-for-signal) は
+# 起動直後から常駐するが apt/dpkg のロックを保持しないため待機対象から除外する。
+# 除外しないと Ubuntu では常時 busy 判定になり、待機上限で異常終了して
+# アップデートが完了しない (v.1.5.5 の不具合)。
+# また GNOME 系で常駐する packagekitd もアイドル時は対象外とし、
+# 実際にロックを掴んでいる場合のみ apt_lock_held で検出する (v.1.5.6)。
+apt_worker_busy() {
+    local pids pid cmdline
+    pids=$(pgrep -f '[a]pt\.systemd\.daily|/usr/bin/apt|/usr/bin/apt-get|/usr/bin/dpkg|/usr/bin/unattended-upgrade|/usr/sbin/aptd' 2>/dev/null) || return 1
+    for pid in ${pids}; do
+        [ "${pid}" = "$$" ] && continue
+        cmdline=$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null) || continue
+        [ -z "${cmdline}" ] && continue
+        case "${cmdline}" in
+            *--wait-for-signal*|*unattended-upgrade-shutdown*) continue ;;
+        esac
+        return 0
+    done
+    return 1
+}
 wait_for_apt_lock() {
     local waited=0
     local max_wait=180
@@ -114,8 +148,12 @@ wait_for_apt_lock() {
                 || lsof -t /var/cache/apt/archives/lock >/dev/null 2>&1; then
                 busy=1
             fi
+        # fuser/lsof が無い最小構成でも /proc 走査でロック保持を正確に判定する
+        elif apt_lock_held; then
+            busy=1
         fi
-        if pgrep -f '[u]nattended-upgr|apt\.systemd\.daily|/usr/bin/apt|/usr/bin/apt-get|/usr/bin/dpkg|packagekitd' >/dev/null 2>&1; then
+        # ロック取得直前の競合窓に備え、実作業プロセスの存在も見る
+        if [ "${busy}" -eq 0 ] && apt_worker_busy; then
             busy=1
         fi
         if [ "${busy}" -eq 0 ]; then
@@ -139,11 +177,11 @@ fix_dpkg_interrupted() {
     dpkg --configure -a || true
     DEBIAN_FRONTEND=noninteractive apt-get install -f -y || true
 }
-# "E: dpkg was interrupted" が出たら修復して最大2回まで再試行するラッパー。
-# set -e 下でも中断せず、修復後に再実行する。
+# "E: dpkg was interrupted" が出たら修復、ロック競合が出たら待機して
+# 最大3回まで再試行するラッパー。set -e 下でも中断せず再実行する。
 apt_update_with_retry() {
     local attempt=1 out rc
-    while [ "${attempt}" -le 2 ]; do
+    while [ "${attempt}" -le 3 ]; do
         wait_for_apt_lock
         set +e
         out=$(apt-get update 2>&1)
@@ -154,14 +192,20 @@ apt_update_with_retry() {
             return 0
         fi
         if echo "${out}" | grep -q "dpkg was interrupted"; then
-            echo "  apt-get update で dpkg 中断を検出。修復して再試行します (${attempt}/2)"
+            echo "  apt-get update で dpkg 中断を検出。修復して再試行します (${attempt}/3)"
             fix_dpkg_interrupted
             attempt=$((attempt + 1))
             continue
         fi
+        if echo "${out}" | grep -qE "Could not get lock|Unable to acquire|locked by another|Resource unavailable"; then
+            echo "  apt-get update でロック競合を検出。待機して再試行します (${attempt}/3)"
+            sleep 10
+            attempt=$((attempt + 1))
+            continue
+        fi
         # 3秒待ってネットワーク系の一時失敗にも再試行する
-        if [ "${attempt}" -lt 2 ]; then
-            echo "  apt-get update が失敗 (rc=${rc})。3秒後に再試行します (${attempt}/2)"
+        if [ "${attempt}" -lt 3 ]; then
+            echo "  apt-get update が失敗 (rc=${rc})。3秒後に再試行します (${attempt}/3)"
             sleep 3
         fi
         attempt=$((attempt + 1))
@@ -171,7 +215,7 @@ apt_update_with_retry() {
 }
 apt_install_with_retry() {
     local attempt=1 out rc
-    while [ "${attempt}" -le 2 ]; do
+    while [ "${attempt}" -le 3 ]; do
         wait_for_apt_lock
         set +e
         out=$(DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" 2>&1)
@@ -182,8 +226,14 @@ apt_install_with_retry() {
             return 0
         fi
         if echo "${out}" | grep -q "dpkg was interrupted"; then
-            echo "  apt-get install で dpkg 中断を検出。修復して再試行します (${attempt}/2)"
+            echo "  apt-get install で dpkg 中断を検出。修復して再試行します (${attempt}/3)"
             fix_dpkg_interrupted
+            attempt=$((attempt + 1))
+            continue
+        fi
+        if echo "${out}" | grep -qE "Could not get lock|Unable to acquire|locked by another|Resource unavailable"; then
+            echo "  apt-get install でロック競合を検出。待機して再試行します (${attempt}/3)"
+            sleep 10
             attempt=$((attempt + 1))
             continue
         fi

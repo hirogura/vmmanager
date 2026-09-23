@@ -936,11 +936,20 @@ function attachHostdev() {
     }).catch(err => alert('通信エラー: ' + err));
 }
 
+function singleGpuParseJson(r) {
+    // 非JSON応答(プロキシのHTMLエラー・空応答など)でも意味のある例外にする
+    return r.text().then(t => {
+        if (!t) throw new Error(`サーバ応答が空です (HTTP ${r.status})`);
+        try { return JSON.parse(t); }
+        catch (e) { throw new Error(`サーバ応答エラー (HTTP ${r.status}): ${t.slice(0, 200)}`); }
+    });
+}
+
 function loadSingleGpu() {
     const box = document.getElementById('single-gpu-box');
     if (!box) return;
     fetch(`/api/vm/${encodeURIComponent(VM_NAME)}/single-gpu`)
-    .then(r => r.json())
+    .then(singleGpuParseJson)
     .then(d => {
         if (d.error) { box.innerHTML = `<p style="color:var(--danger);font-size:11px">エラー: ${d.error}</p>`; return; }
         const st = d.status || {};
@@ -990,7 +999,7 @@ function setSingleGpu(enable) {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({action: enable ? 'enable' : 'disable', pci_address: pci})
     })
-    .then(r => r.json())
+    .then(singleGpuParseJson)
     .then(d => {
         if (d.error) {
             alert('エラー: ' + d.error + ((d.details && d.details.length) ? '\n' + d.details.join('\n') : ''));

@@ -4227,9 +4227,11 @@ exit 0
         with open(hook_path, "w", encoding="utf-8") as f:
             f.write(script)
         os.chmod(hook_path, 0o755)
-        # libvirtd にフック再読込させる
-        import subprocess
-        subprocess.run(["systemctl", "restart", "libvirtd"], capture_output=True, timeout=60)
+        # NOTE: qemu フックはVMのライフサイクル毎に都度読み込まれるため
+        # libvirtd の再起動は不要。かつてここで `systemctl restart libvirtd`
+        # を実行していたが、vm-manage.service が Requires=libvirtd.service のため
+        # 自サービスごと停止してリクエストが切断され、フロントでJSONエラーに
+        # なっていた (Empty reply)。再起動は行わない。
         action = "更新" if old else "作成"
         return True, f"{action}: {hook_path} (対象VM={vm_name}, GPU={pci})"
     except OSError as e:
@@ -4415,7 +4417,9 @@ def api_single_gpu_status(name):
 
 @app.route("/api/vm/<name>/single-gpu", methods=["POST"])
 def api_single_gpu_set(name):
-    data = request.json or {}
+    # silent=True で不正JSON時もHTML 400ではなくJSONエラーを返す
+    # (フロントの r.json() がHTMLで失敗して「JSONエラー」になるのを防ぐ)
+    data = request.get_json(silent=True) or {}
     action = (data.get("action") or "").strip().lower()
     req_addr = (data.get("pci_address") or "").strip()
     if action not in ("enable", "disable"):
@@ -4443,8 +4447,11 @@ def api_single_gpu_set(name):
     if action == "enable":
         if len(gpus) == 1:
             details.append(f"注意: ホストGPUは1つだけです ({gpu['pci_address']} {gpu['description']})。有効化するとホストの画面出力が失われます。SSH等での操作を推奨します。")
-        # VM存在確認
-        conn = get_conn()
+        # VM存在確認 (libvirtd停止中もHTML 500ではなくJSONエラーを返す)
+        try:
+            conn = get_conn()
+        except libvirt.libvirtError as e:
+            return jsonify({"error": f"libvirtへの接続に失敗しました: {e}"}), 500
         try:
             try:
                 dom = conn.lookupByName(name)

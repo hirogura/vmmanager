@@ -43,7 +43,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const btnUpdate = document.getElementById('btn-server-update');
     if (btnUpdate) {
         btnUpdate.addEventListener('click', function() {
-            if (!confirm('VM Managerを最新版にアップデートしますか？\n完了後、「サーバ再起動」ボタンを押して反映してください。')) return;
+            if (!confirm('VM Managerを最新版にアップデートしますか？\n完了後、自動でサーバを再起動します。')) return;
             const original = btnUpdate.innerHTML;
             btnUpdate.disabled = true;
             btnUpdate.innerHTML = '<i class="fas fa-spinner fa-spin"></i> アップデート中...';
@@ -65,7 +65,27 @@ document.addEventListener('DOMContentLoaded', function() {
                                 btnUpdate.disabled = false;
                                 btnUpdate.innerHTML = original;
                                 if (st.success) {
-                                    alert('アップデートが完了しました。「サーバ再起動」ボタンを押してください。');
+                                    alert('アップデートが完了しました。自動でサーバを再起動します。');
+                                    btnUpdate.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 再起動中...';
+                                    fetch('/api/server/restart', { method: 'POST' })
+                                        .then(() => {})
+                                        .catch(() => {});
+                                    let attempts = 0;
+                                    const restartPoll = setInterval(async () => {
+                                        attempts++;
+                                        try {
+                                            await fetch('/', { method: 'GET', cache: 'no-store' });
+                                            clearInterval(restartPoll);
+                                            location.reload();
+                                        } catch (e) {
+                                            if (attempts > 30) {
+                                                clearInterval(restartPoll);
+                                                btnUpdate.disabled = false;
+                                                btnUpdate.innerHTML = original;
+                                                alert('再起動完了の確認ができませんでした。ページをリロードしてください。');
+                                            }
+                                        }
+                                    }, 3000);
                                 } else {
                                     alert('アップデートに失敗しました:\n' + (st.log || '詳細不明'));
                                 }

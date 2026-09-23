@@ -90,6 +90,48 @@ wait_for_pacman_lock() {
         fi
     done
 }
+# Debian/Ubuntu: apt/dpkg のロック・中断対策。
+# Ubuntu の自動アップデート (unattended-upgrades) 実行中や、前回の apt/dist-upgrade
+# が中断したまま再実行すると [1/9] で下記エラーになる:
+#   E: dpkg was interrupted, you must manually run 'sudo dpkg --configure -a'
+# を自動修復する。Arch 側の wait_for_pacman_lock と対になる処理。
+wait_for_apt_lock() {
+    local waited=0
+    local max_wait=120
+    if command -v fuser >/dev/null 2>&1; then
+        while fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; do
+            if [ "${waited}" -ge "${max_wait}" ]; then
+                echo "エラー: apt/dpkg がロック中です。他プロセス終了後に再実行してください"
+                echo "  確認: ps aux | grep -E 'apt|dpkg|unattended-upgr' | grep -v grep"
+                exit 1
+            fi
+            echo "  apt/dpkg が使用中のため待機しています... (${waited}s/${max_wait}s)"
+            sleep 5
+            waited=$((waited + 5))
+        done
+    else
+        while pgrep -x apt >/dev/null 2>&1 \
+            || pgrep -x apt-get >/dev/null 2>&1 \
+            || pgrep -x dpkg >/dev/null 2>&1 \
+            || pgrep -x unattended-upgr >/dev/null 2>&1; do
+            if [ "${waited}" -ge "${max_wait}" ]; then
+                echo "エラー: apt/dpkg がロック中です。他プロセス終了後に再実行してください"
+                exit 1
+            fi
+            echo "  apt/dpkg が使用中のため待機しています... (${waited}s/${max_wait}s)"
+            sleep 5
+            waited=$((waited + 5))
+        done
+    fi
+}
+fix_dpkg_interrupted() {
+    # Ubuntu アップデート中断後の残留状態を修復する。
+    # dpkg --configure -a がエラーメッセージの指示そのもの。
+    # apt-get install -f で壊れた依存も修復する。失敗しても set -e で落とさない。
+    echo "  dpkg の中断状態を確認・修復しています..."
+    dpkg --configure -a || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -f -y || true
+}
 if [ "${DISTRO_FAMILY}" = "arch" ]; then
     echo "[1/9] システムパッケージをインストール中... (pacman)"
     wait_for_pacman_lock
@@ -114,6 +156,9 @@ if [ "${DISTRO_FAMILY}" = "arch" ]; then
         lsof
 else
     echo "[1/9] システムパッケージをインストール中... (apt)"
+    export DEBIAN_FRONTEND=noninteractive
+    wait_for_apt_lock
+    fix_dpkg_interrupted
     apt-get update -qq
     apt-get install -y -qq \
         python3 \
@@ -310,6 +355,8 @@ if ! command -v git >/dev/null 2>&1; then
         wait_for_pacman_lock
         pacman -S --needed --noconfirm git
     else
+        wait_for_apt_lock
+        fix_dpkg_interrupted
         apt-get install -y -qq git
     fi
 fi

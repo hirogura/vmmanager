@@ -29,11 +29,11 @@
         </dl>
         <div class="btn-group">
             {% if vm.state == 'stopped' %}
-                <button class="btn btn-success btn-sm" onclick="vmAction({{ vm.name|tojson }}, 'start')"><i class="fas fa-play"></i> 起動</button>
+                <button class="btn btn-success btn-sm" onclick='vmAction({{ vm.name|tojson }}, "start")'><i class="fas fa-play"></i> 起動</button>
             {% else %}
-                <button class="btn btn-warning btn-sm" onclick="vmAction({{ vm.name|tojson }}, 'stop')"><i class="fas fa-stop"></i> 停止</button>
-                <button class="btn btn-danger btn-sm" onclick="vmAction({{ vm.name|tojson }}, 'destroy')"><i class="fas fa-power-off"></i> 強制停止</button>
-                <button class="btn btn-info btn-sm" onclick="vmAction({{ vm.name|tojson }}, 'reboot')"><i class="fas fa-redo"></i> 再起動</button>
+                <button class="btn btn-warning btn-sm" onclick='vmAction({{ vm.name|tojson }}, "stop")'><i class="fas fa-stop"></i> 停止</button>
+                <button class="btn btn-danger btn-sm" onclick='vmAction({{ vm.name|tojson }}, "destroy")'><i class="fas fa-power-off"></i> 強制停止</button>
+                <button class="btn btn-info btn-sm" onclick='vmAction({{ vm.name|tojson }}, "reboot")'><i class="fas fa-redo"></i> 再起動</button>
             {% endif %}
             <a href="/vm/{{ vm.name }}" class="btn btn-info btn-sm"><i class="fas fa-cog"></i> 設定</a>
         </div>

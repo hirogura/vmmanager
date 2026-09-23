@@ -97,32 +97,39 @@ wait_for_pacman_lock() {
 # を自動修復する。Arch 側の wait_for_pacman_lock と対になる処理。
 wait_for_apt_lock() {
     local waited=0
-    local max_wait=120
-    if command -v fuser >/dev/null 2>&1; then
-        while fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; do
-            if [ "${waited}" -ge "${max_wait}" ]; then
-                echo "エラー: apt/dpkg がロック中です。他プロセス終了後に再実行してください"
-                echo "  確認: ps aux | grep -E 'apt|dpkg|unattended-upgr' | grep -v grep"
-                exit 1
+    local max_wait=180
+    # fuser が無い環境 (最小構成の Ubuntu 等) でも検出できるよう、
+    # ロックファイル保持プロセス (fuser/lsof) とプロセス名 (pgrep -f) の両方を見る。
+    # -x (完全一致) では unattended-upgrade / APT::SystemdDaily を取り逃がすため -f で照合する。
+    while true; do
+        local busy=0
+        if command -v fuser >/dev/null 2>&1; then
+            if fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; then
+                busy=1
             fi
-            echo "  apt/dpkg が使用中のため待機しています... (${waited}s/${max_wait}s)"
-            sleep 5
-            waited=$((waited + 5))
-        done
-    else
-        while pgrep -x apt >/dev/null 2>&1 \
-            || pgrep -x apt-get >/dev/null 2>&1 \
-            || pgrep -x dpkg >/dev/null 2>&1 \
-            || pgrep -x unattended-upgr >/dev/null 2>&1; do
-            if [ "${waited}" -ge "${max_wait}" ]; then
-                echo "エラー: apt/dpkg がロック中です。他プロセス終了後に再実行してください"
-                exit 1
+        elif command -v lsof >/dev/null 2>&1; then
+            if lsof -t /var/lib/dpkg/lock-frontend >/dev/null 2>&1 \
+                || lsof -t /var/lib/dpkg/lock >/dev/null 2>&1 \
+                || lsof -t /var/lib/apt/lists/lock >/dev/null 2>&1 \
+                || lsof -t /var/cache/apt/archives/lock >/dev/null 2>&1; then
+                busy=1
             fi
-            echo "  apt/dpkg が使用中のため待機しています... (${waited}s/${max_wait}s)"
-            sleep 5
-            waited=$((waited + 5))
-        done
-    fi
+        fi
+        if pgrep -f '[u]nattended-upgr|apt\.systemd\.daily|/usr/bin/apt|/usr/bin/apt-get|/usr/bin/dpkg|packagekitd' >/dev/null 2>&1; then
+            busy=1
+        fi
+        if [ "${busy}" -eq 0 ]; then
+            break
+        fi
+        if [ "${waited}" -ge "${max_wait}" ]; then
+            echo "エラー: apt/dpkg がロック中です。他プロセス終了後に再実行してください"
+            echo "  確認: ps aux | grep -E 'apt|dpkg|unattended-upgr' | grep -v grep"
+            exit 1
+        fi
+        echo "  apt/dpkg が使用中のため待機しています... (${waited}s/${max_wait}s)"
+        sleep 5
+        waited=$((waited + 5))
+    done
 }
 fix_dpkg_interrupted() {
     # Ubuntu アップデート中断後の残留状態を修復する。
@@ -131,6 +138,59 @@ fix_dpkg_interrupted() {
     echo "  dpkg の中断状態を確認・修復しています..."
     dpkg --configure -a || true
     DEBIAN_FRONTEND=noninteractive apt-get install -f -y || true
+}
+# "E: dpkg was interrupted" が出たら修復して最大2回まで再試行するラッパー。
+# set -e 下でも中断せず、修復後に再実行する。
+apt_update_with_retry() {
+    local attempt=1 out rc
+    while [ "${attempt}" -le 2 ]; do
+        wait_for_apt_lock
+        set +e
+        out=$(apt-get update 2>&1)
+        rc=$?
+        set -e
+        echo "${out}" | tail -n 5
+        if [ "${rc}" -eq 0 ]; then
+            return 0
+        fi
+        if echo "${out}" | grep -q "dpkg was interrupted"; then
+            echo "  apt-get update で dpkg 中断を検出。修復して再試行します (${attempt}/2)"
+            fix_dpkg_interrupted
+            attempt=$((attempt + 1))
+            continue
+        fi
+        # 3秒待ってネットワーク系の一時失敗にも再試行する
+        if [ "${attempt}" -lt 2 ]; then
+            echo "  apt-get update が失敗 (rc=${rc})。3秒後に再試行します (${attempt}/2)"
+            sleep 3
+        fi
+        attempt=$((attempt + 1))
+    done
+    echo "エラー: apt-get update に失敗しました"
+    return 1
+}
+apt_install_with_retry() {
+    local attempt=1 out rc
+    while [ "${attempt}" -le 2 ]; do
+        wait_for_apt_lock
+        set +e
+        out=$(DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" 2>&1)
+        rc=$?
+        set -e
+        echo "${out}" | tail -n 5
+        if [ "${rc}" -eq 0 ]; then
+            return 0
+        fi
+        if echo "${out}" | grep -q "dpkg was interrupted"; then
+            echo "  apt-get install で dpkg 中断を検出。修復して再試行します (${attempt}/2)"
+            fix_dpkg_interrupted
+            attempt=$((attempt + 1))
+            continue
+        fi
+        attempt=$((attempt + 1))
+    done
+    echo "エラー: apt-get install に失敗しました: $*"
+    return 1
 }
 if [ "${DISTRO_FAMILY}" = "arch" ]; then
     echo "[1/9] システムパッケージをインストール中... (pacman)"
@@ -159,8 +219,8 @@ else
     export DEBIAN_FRONTEND=noninteractive
     wait_for_apt_lock
     fix_dpkg_interrupted
-    apt-get update -qq
-    apt-get install -y -qq \
+    apt_update_with_retry
+    apt_install_with_retry -qq \
         python3 \
         python3-venv \
         python3-pip \
@@ -357,7 +417,7 @@ if ! command -v git >/dev/null 2>&1; then
     else
         wait_for_apt_lock
         fix_dpkg_interrupted
-        apt-get install -y -qq git
+        apt_install_with_retry -qq git
     fi
 fi
 if [ -d "${INSTALL_DIR}/.git" ]; then

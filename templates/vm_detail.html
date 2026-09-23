@@ -959,14 +959,14 @@ function loadSingleGpu() {
         const attached = !!st.attached_in_xml;
         let html = '';
         html += `<div style="font-size:11px;margin-bottom:6px">状態: <span class="badge ${enabled ? 'badge-success' : 'badge-info'}">${enabled ? '有効' : '無効'}</span> `;
-        html += `<span style="color:var(--text-muted)">XML割当: ${attached ? 'あり' : 'なし'} / IOMMU: ${host.iommu_enabled ? '有効' : '無効'} / vfio: ${host.vfio_loaded ? '読込済' : '未読込'}</span></div>`;
+        html += `<span style="color:var(--text-muted)">XML割当: ${attached ? 'あり' : 'なし'} / IOMMU: ${host.iommu_enabled ? '有効' : '無効'} / vfio: ${host.vfio_loaded ? '読込済' : '未読込'}${st.state && st.state.pending ? ' / ホスト設定のみ適用済み(再起動後に再度有効化)' : ''}</span></div>`;
         if (!gpus.length) {
             html += '<p style="color:var(--text-muted);font-size:11px">ホストGPUが検出できません</p>';
         } else {
             html += '<div style="font-size:11px;margin-bottom:6px">ホストGPU:</div>';
             gpus.forEach(g => {
                 const sel = (st.pci_address && st.pci_address.toLowerCase() === g.pci_address.toLowerCase()) || (!st.pci_address && g.boot_vga);
-                html += `<label class="checkbox-group" style="font-size:11px"><input type="radio" name="single_gpu_pci" value="${g.pci_address}" ${sel ? 'checked' : ''}> <span style="font-family:monospace">${g.pci_address}</span> ${g.description || ''} <span style="color:var(--text-muted)">(${g.vendor_id}:${g.product_id} / ${g.driver || 'driverなし'}${g.boot_vga ? ' / bootVGA' : ''})</span></label>`;
+                html += `<label class="checkbox-group" style="font-size:11px"><input type="radio" name="single_gpu_pci" value="${g.pci_address}" ${sel ? 'checked' : ''}> <span style="font-family:monospace">${g.pci_address}</span> ${g.description || ''} <span style="color:var(--text-muted)">(${g.vendor_id}:${g.product_id} / ${g.driver || 'driverなし'}${g.boot_vga ? ' / bootVGA' : ''} / IOMMUグループ:${g.iommu_group || 'なし(パススルー不可)'})</span></label>`;
             });
             if (gpus.length === 1) {
                 html += '<div style="font-size:11px;color:var(--warning,#c90)">警告: GPUは1つだけです。有効化するとホスト画面が失われます。</div>';

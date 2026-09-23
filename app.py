@@ -988,6 +988,26 @@ def vm_action(name):
                     _define_xml(conn, fixed_xml)
                     dom = conn.lookupByName(name)
                     dom.create()
+                elif "VFIO PCI device assignment is not supported" in str(e):
+                    try:
+                        _sg_state = _single_gpu_load_state()
+                    except Exception:
+                        _sg_state = {}
+                    hint = ""
+                    if isinstance(_sg_state, dict) and _sg_state.get("enabled") and _sg_state.get("vm") == name:
+                        hint = (
+                            " 単一GPU強制パススルーが有効なVMです。ホストのIOMMU/VFIO未対応 "
+                            f"(GPU={_sg_state.get('pci_address', '')}) が原因のため、"
+                            "VM詳細の「単一GPU強制パススルー → 無効化」で hostdev を外すと起動できるようになります。"
+                        )
+                    conn.close()
+                    return jsonify({"error": (
+                        "ホストがVFIO PCI割当に未対応のため起動できません。"
+                        "BIOS/UEFI で VT-d (Intel) / AMD-Vi (AMD) が有効か、"
+                        "/sys/kernel/iommu_groups が空でないか確認してください。"
+                        "Intel内蔵GPU (00:02.0 等) は vfio-pci にバインド不可の機種があります"
+                        " (dmesg: 'probe ... failed with error -22')。" + hint
+                    )}), 400
                 else:
                     raise
         elif action == "stop":
@@ -3864,6 +3884,71 @@ def _single_gpu_check_host():
     return info
 
 
+def _single_gpu_gpu_iommu_group(pci_address):
+    """指定PCIデバイスのIOMMUグループ名を返す。存在しなければ "" を返す。"""
+    try:
+        grp = os.readlink(f"/sys/bus/pci/devices/{pci_address}/iommu_group")
+        return os.path.basename(grp)
+    except OSError:
+        return ""
+
+
+def _single_gpu_preflight(gpu, host=None):
+    """有効化前のVFIO実現可能性検査。
+    戻り値: (status, message)。status は以下のいずれか。
+      - "ok": そのまま進めてよい
+      - "ok-igpu-warning": 進めるが Intel内蔵GPU の警告を details に付与すべき
+      - "reboot-required": IOMMU未設定のためホスト設定＋再起動が先 (VM割当は見送り)
+      - "unsupported": ハード/BIOS起因でVFIO不可 (VM割当を行ってはならない)
+    IOMMUグループが無い状態で <hostdev type='pci'> を定義すると、VMは起動時に
+    "VFIO PCI device assignment is not supported by the host" で失敗するだけの
+    起動不能な定義になるため、割当前にここで検出する。
+    Intel内蔵GPU (00:02.0 等の boot VGA) は vfio-pci へのバインド自体がカーネルに
+    拒否される (dmesg: "vfio-pci ... probe with driver vfio-pci failed with
+    error -22") ため、通常の hostdev パススルーは不可 (共有には GVT-g 等が必要)。
+    """
+    if host is None:
+        try:
+            host = _single_gpu_check_host()
+        except Exception:
+            host = {}
+    pci = gpu.get("pci_address", "")
+    group = gpu.get("iommu_group", "")
+    if not group and pci:
+        group = _single_gpu_gpu_iommu_group(pci)
+    groups = host.get("iommu_groups", 0) or 0
+    has_param = bool(host.get("has_iommu_param", False))
+    vendor = (gpu.get("vendor_id", "") or "").lower().replace("0x", "")
+    is_intel_igpu = vendor == "8086" and bool(gpu.get("boot_vga"))
+    if groups == 0 and not has_param:
+        return ("reboot-required",
+                "ホストでIOMMUがまだ有効化されていません "
+                "(IOMMUグループなし・kernel cmdline に iommu パラメータなし)。 "
+                "先にホスト設定を適用して再起動し、再起動後に再度有効化を実行してください "
+                "(現時点ではVM定義への割当は行いません)。")
+    if groups == 0 or not group:
+        reason = (
+            f"対象GPU {pci} はIOMMUグループに属していないためVFIOパススルーできません "
+            f"(ホストのIOMMUグループ数={groups})。 "
+            "BIOS/UEFI で VT-d (Intel) / AMD-Vi (AMD) が有効か確認してください。"
+        )
+        if is_intel_igpu:
+            reason += (
+                " また Intel内蔵GPU (00:02.0 等の boot VGA) は vfio-pci へのバインド自体が "
+                "カーネルに拒否されます "
+                "(dmesg: 'vfio-pci 0000:00:02.0: probe with driver vfio-pci failed with error -22')。 "
+                "通常の hostdev パススルーは不可のため外部GPU (dGPU) が必要です "
+                "(内蔵GPUの画面共有には GVT-g/SR-IOV 等の別方式が必要です)。"
+            )
+        return ("unsupported", reason)
+    if is_intel_igpu:
+        return ("ok-igpu-warning",
+                f"注意: {pci} はホストの起動VGA (Intel内蔵GPU) です。 "
+                "有効化するとホストの画面出力が失われ、vfio-pci バインドに失敗する機種もあります "
+                "(dmesg の 'probe ... failed with error -22' が出たら非対応)。")
+    return ("ok", "")
+
+
 def _single_gpu_vm_status(vm_name, xml_str=None, state=None):
     """VMが単一GPUパススルー有効かどうかを返す。"""
     if state is None:
@@ -4239,11 +4324,22 @@ exit 0
 
 
 def _single_gpu_attach_xml(vm_name, gpu):
-    """VM定義にGPU hostdevを追加する (VM停止中のみ)。既存の同アドレスは置換。"""
+    """VM定義にGPU hostdevを追加する (VM停止中のみ)。既存の同アドレスは置換。
+    IOMMUグループに属さないGPUは libvirt が起動時に
+    "VFIO PCI device assignment is not supported by the host" で失敗するだけの
+    起動不能な定義になるため、ここで事前に拒否する。"""
     pci = gpu.get("pci_address", "")  # 0000:00:01.0
     m = _re.match(r"^([0-9a-fA-F]{4}):([0-9a-fA-F]{2}):([0-9a-fA-F]{2})\.([0-9a-fA-F])$", pci)
     if not m:
         return False, f"PCIアドレス形式が不正: {pci}"
+    group = gpu.get("iommu_group", "") or _single_gpu_gpu_iommu_group(pci)
+    if not group:
+        return False, (
+            f"対象GPU {pci} はIOMMUグループに属していないためVFIOパススルーできません。 "
+            "BIOS/UEFI で VT-d (Intel) / AMD-Vi (AMD) が有効か確認してください。 "
+            "この状態でVM定義に割り当てても、起動時に "
+            "'VFIO PCI device assignment is not supported by the host' で失敗します。"
+        )
     domain, bus, slot, func = m.group(1), m.group(2), m.group(3), m.group(4)
     domain_x = "0x" + domain.lower()
     bus_x = "0x" + bus.lower()
@@ -4306,6 +4402,8 @@ def _single_gpu_attach_xml(vm_name, gpu):
             hd_el.set("mode", "subsystem")
             hd_el.set("type", "pci")
             hd_el.set("managed", "yes")
+            drv = ET.SubElement(hd_el, "driver")
+            drv.set("name", "vfio")
             src = ET.SubElement(hd_el, "source")
             addr = ET.SubElement(src, "address")
             addr.set("domain", domain_x)
@@ -4327,9 +4425,28 @@ def _single_gpu_attach_xml(vm_name, gpu):
             ioapic = ET.SubElement(feats, "ioapic")
             ioapic.set("driver", "kvm")
         new_xml = ET.tostring(root, encoding="unicode")
-        _define_xml(conn, new_xml)
+        try:
+            _define_xml(conn, new_xml)
+        except libvirt.libvirtError as e:
+            msg = str(e)
+            if "VFIO PCI device assignment is not supported" in msg:
+                return False, (
+                    "VM定義更新失敗: ホストがVFIO PCI割当に未対応です "
+                    "(IOMMUグループなし等)。BIOS/UEFI で VT-d / AMD-Vi を有効化し、 "
+                    "kernel cmdline の iommu パラメータ適用後にホストを再起動してから "
+                    "再度有効化してください。詳細: " + msg
+                )
+            return False, f"VM定義更新失敗: {e}"
         return True, f"VM定義にGPU hostdev を追加: {pci} (+同スロット機能 {len(funcs)-1}件、重複除去 {removed}件)"
     except libvirt.libvirtError as e:
+        msg = str(e)
+        if "VFIO PCI device assignment is not supported" in msg:
+            return False, (
+                "VM定義更新失敗: ホストがVFIO PCI割当に未対応です "
+                "(IOMMUグループなし等)。BIOS/UEFI で VT-d / AMD-Vi を有効化し、 "
+                "kernel cmdline の iommu パラメータ適用後にホストを再起動してから "
+                "再度有効化してください。詳細: " + msg
+            )
         return False, f"VM定義更新失敗: {e}"
     finally:
         try:
@@ -4464,6 +4581,38 @@ def api_single_gpu_set(name):
                 conn.close()
             except Exception:
                 pass
+        # 0. プリフライト検査 (IOMMU / iGPU)。不可ならVM定義を壊さない。
+        # IOMMUグループが無い状態で hostdev を割り当てると、VMは起動時に
+        # "VFIO PCI device assignment is not supported by the host" で失敗するだけの
+        # 起動不能な定義になるため、割当前に検出する。
+        try:
+            _sg_host_info = _single_gpu_check_host()
+        except Exception:
+            _sg_host_info = {}
+        pf_status, pf_msg = _single_gpu_preflight(gpu, _sg_host_info)
+        if pf_status == "reboot-required":
+            needs_reboot_host, d1 = _single_gpu_ensure_host_config(gpu)
+            details.extend(d1)
+            details.append(pf_msg)
+            _single_gpu_save_state({
+                "enabled": False,
+                "pending": True,
+                "vm": name,
+                "pci_address": gpu["pci_address"],
+                "vfio_id": gpu.get("vfio_id", ""),
+                "nodedev": gpu.get("nodedev", ""),
+            })
+            _single_gpu_log(
+                f"単一GPU強制パススルー有効化 (VM={name}, GPU={gpu['pci_address']}): "
+                "IOMMU未有効のためホスト設定のみ適用 (VM割当は再起動後に再実行)\n"
+                + "\n".join(f"- {x}" for x in details)
+            )
+            return jsonify({"success": True, "enabled": False, "pending": True,
+                            "needs_reboot": needs_reboot_host, "gpu": gpu, "details": details})
+        if pf_status == "unsupported":
+            return jsonify({"error": pf_msg, "details": details}), 400
+        if pf_status == "ok-igpu-warning":
+            details.append(pf_msg)
         # 1. ホスト設定
         needs_reboot_host, d1 = _single_gpu_ensure_host_config(gpu)
         details.extend(d1)

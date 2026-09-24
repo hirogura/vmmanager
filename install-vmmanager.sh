@@ -98,6 +98,9 @@ wait_for_pacman_lock() {
 # ロックファイルを実際に掴んでいるプロセスがあれば 0 を返す。
 # fuser/lsof が無い環境でも動作する。アイドル中の packagekitd 等は
 # ロックを保持していないため待機対象にならない (v.1.5.6)。
+# /proc 走査時はプロセスが一瞬で終了して消えることがあるため、
+# リダイレクト失敗のエラーを出さないよう 2>/dev/null を先に書く
+# (v.1.5.7: "< file 2>/dev/null" の順だと bash が No such file を出す)。
 apt_lock_held() {
     local pid locks
     for pid in $(ls /proc 2>/dev/null | grep -E '^[0-9]+$'); do
@@ -115,17 +118,24 @@ apt_lock_held() {
 # アップデートが完了しない (v.1.5.5 の不具合)。
 # また GNOME 系で常駐する packagekitd もアイドル時は対象外とし、
 # 実際にロックを掴んでいる場合のみ apt_lock_held で検出する (v.1.5.6)。
+# v.1.5.7: pgrep -f の複合パターン ('A|B|C') は [a] トリックが最初の選択肢にしか
+# 効かず、パターン文字列自体に含まれる "/usr/bin/apt" 等に pgrep 自身がマッチして
+# 自分自身を busy 判定する。PID が一瞬で消えるため "/proc/<pgrep自身>/cmdline:
+# No such file" が出て、タイミング次第では誤って最大 180 秒待機する。
+# このため pgrep を廃止し /proc 直接走査に統一した (CachyOS 側は不使用のため影響なし)。
 apt_worker_busy() {
-    local pids pid cmdline
-    pids=$(pgrep -f '[a]pt\.systemd\.daily|/usr/bin/apt|/usr/bin/apt-get|/usr/bin/dpkg|/usr/bin/unattended-upgrade|/usr/sbin/aptd' 2>/dev/null) || return 1
-    for pid in ${pids}; do
+    local pid cmdline
+    for pid in $(ls /proc 2>/dev/null | grep -E '^[0-9]+$'); do
         [ "${pid}" = "$$" ] && continue
-        cmdline=$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null) || continue
+        # 既に終了したプロセスは黙ってスキップ (エラー表示なし)
+        [ -r "/proc/${pid}/cmdline" ] || continue
+        cmdline=$(tr '\0' ' ' 2>/dev/null < "/proc/${pid}/cmdline") || continue
         [ -z "${cmdline}" ] && continue
         case "${cmdline}" in
             *--wait-for-signal*|*unattended-upgrade-shutdown*) continue ;;
+            *apt.systemd.daily*|*/usr/bin/apt|*/usr/bin/apt\ *|*/usr/bin/apt-get|*/usr/bin/apt-get\ *|*/usr/bin/dpkg|*/usr/bin/dpkg\ *|*/usr/bin/unattended-upgrade*|*/usr/sbin/aptd*)
+                return 0 ;;
         esac
-        return 0
     done
     return 1
 }
@@ -133,8 +143,8 @@ wait_for_apt_lock() {
     local waited=0
     local max_wait=180
     # fuser が無い環境 (最小構成の Ubuntu 等) でも検出できるよう、
-    # ロックファイル保持プロセス (fuser/lsof) とプロセス名 (pgrep -f) の両方を見る。
-    # -x (完全一致) では unattended-upgrade / APT::SystemdDaily を取り逃がすため -f で照合する。
+    # ロックファイル保持プロセス (fuser/lsof) と作業プロセス (/proc 走査) の両方を見る。
+    # v.1.5.7: pgrep -f は自己マッチで誤検出するため使用しない。
     while true; do
         local busy=0
         if command -v fuser >/dev/null 2>&1; then
@@ -173,9 +183,30 @@ fix_dpkg_interrupted() {
     # Ubuntu アップデート中断後の残留状態を修復する。
     # dpkg --configure -a がエラーメッセージの指示そのもの。
     # apt-get install -f で壊れた依存も修復する。失敗しても set -e で落とさない。
+    # v.1.5.7: クリーンインストール直後など中断が無い場合は何もせず即戻る。
+    # 従来は無条件で apt-get install -f を回していたため、依存解決・needrestart
+    # などで毎回時間がかかり「中断していないのに修復しています」と表示されていた。
+    if ! dpkg_needs_repair; then
+        echo "  dpkg の中断状態: なし (スキップ)"
+        return 0
+    fi
     echo "  dpkg の中断状態を確認・修復しています..."
     dpkg --configure -a || true
     DEBIAN_FRONTEND=noninteractive apt-get install -f -y || true
+}
+# dpkg の中断・破損が残っている場合のみ 0 を返す。
+# 判定材料: dpkg --audit の出力 /var/lib/dpkg/updates の残留 / 要再インストール状態。
+dpkg_needs_repair() {
+    if dpkg --audit 2>/dev/null | grep -q .; then
+        return 0
+    fi
+    if [ -d /var/lib/dpkg/updates ] && [ -n "$(ls -A /var/lib/dpkg/updates 2>/dev/null | grep -v '^tmp.i$')" ]; then
+        return 0
+    fi
+    if dpkg -l 2>/dev/null | grep -qE '^..R|^i[UFHW]'; then
+        return 0
+    fi
+    return 1
 }
 # "E: dpkg was interrupted" が出たら修復、ロック競合が出たら待機して
 # 最大3回まで再試行するラッパー。set -e 下でも中断せず再実行する。

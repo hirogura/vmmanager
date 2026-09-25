@@ -249,176 +249,26 @@ def _efi_loader_lines(vm_name, secure):
 
 
 # ============================================================
-# Secure Boot 鍵登録 (CachyOS/Arch 対応・v1.6.0)
+# Secure Boot 鍵登録 (CachyOS/Arch 対応・v1.6.1)
 # 背景: CachyOS/Arch の edk2-ovmf には鍵登録済み VARS テンプレートが無く、
 # OVMF_VARS.4m.fd は空の変数ストアであるため、secure-boot=yes の定義でも
-# Setup Mode のまま Secure Boot が実施されず、未署名ブートローダが起動する
-# (実機検証: 未署名 limine が起動→「Access Denied」にならない)。
-# そのため SB 要求時は VM ごとの NVRAM ファイルへ鍵を登録する:
-#   PK (VM固有・自己署名・openssl生成) / KEK (MS KEK CA 2011) /
-#   db (MS UEFI CA 2011 + MS Windows Production PCA 2011) +
-#   SecureBoot=1 / SetupMode=0 / SecureBootEnable=1。
-# MS 証明書は初回のみ Microsoft 公式 (pkiops) から取得しキャッシュする。
+# Setup Mode のまま Secure Boot が実施されず、未署名ブートローダが起動する。
+# そのため SB 要求時は VM ごとの NVRAM ファイルへ鍵を登録する。
+# 実装は virt-fw-vars (参照実装) に委譲する:
+#   - v1.6.0 の自前実装では db のベンダーGUID を誤っており (DFFD511系)、
+#     MS 署名ブートローダ (Ubuntu の shim 等) が「Access Denied」で起動
+#     できなかった。参照実装の配置 (PK/KEK=db は実機検証済みの GUID) を使う。
+#   - MS 証明書 (2011+2023 世代・内包) と VM 固有 PK (自動生成) を登録する。
+#   - virt-fw-vars が無い場合は明示エラーにする (CachyOS/Arch: virt-firmware)。
 # Debian 系の鍵登録済みテンプレート (.ms.fd) の場合は何もしない。
+# 登録済みなら何もせず、未登録ならテンプレートから新規作成する
+# (Boot エントリは次回起動時に再生成される)。
 # ============================================================
-SECUREBOOT_STORE_DIR = "/var/lib/vm-manage/secureboot"
-_MS_CERTS = {
-    # name: (cache filename, [URLs: direct canonical first, fwlink fallback], subject CN fragment)
-    # 注意: fwlink の指す先は MS 側で変更されることがある
-    # (例: LinkId=321192 は KEK CA だったが現在は Win PCA を指す)。
-    # CN 検証で内容を確認し、不一致なら次の URL を試す。
-    "KEK_CA": (
-        "MicCorKEKCA2011.crt",
-        [
-            "https://www.microsoft.com/pkiops/certs/MicCorKEKCA2011_2011-06-24.crt",
-        ],
-        "Microsoft Corporation KEK CA 2011",
-    ),
-    "UEFI_CA": (
-        "MicCorUEFICA2011.crt",
-        [
-            "https://www.microsoft.com/pkiops/certs/MicCorUEFCA2011_2011-06-27.crt",
-            "https://go.microsoft.com/fwlink/?LinkId=321194",
-        ],
-        "Microsoft Corporation UEFI CA 2011",
-    ),
-    "WIN_PCA": (
-        "MicWinProPCA2011.crt",
-        [
-            "https://www.microsoft.com/pkiops/certs/MicWinProPCA2011_2011-10-19.crt",
-        ],
-        "Microsoft Windows Production PCA 2011",
-    ),
-}
 _EFI_GLOBAL_GUID = bytes.fromhex("61dfe48bca93d211aa0d00e098032b8c")
-_EFI_X509_GUID = bytes.fromhex("a159c0a5e494a74a87b5ab155c2bf072")
+# 署名データベース用 GUID (virt-fw-vars が db/dbx に使う実効値・実機検証済み)。
+_EFI_IMAGE_SECURITY_DATABASE_GUID = bytes.fromhex("cbb219d73a3d9645a3bcdad00e67656f")
 _EFI_VAR_ADDED = 0x3F
 _EFI_VAR_ALIGN = 4
-
-
-def _sb_ensure_store_dir():
-    try:
-        os.makedirs(SECUREBOOT_STORE_DIR, mode=0o700, exist_ok=True)
-    except OSError as e:
-        raise RuntimeError(f"鍵ストアの作成に失敗しました: {e}")
-    try:
-        os.chmod(SECUREBOOT_STORE_DIR, 0o700)
-    except OSError:
-        pass
-
-
-def _sb_fetch_cert(cache_name, urls, cn_fragment):
-    """MS 証明書をキャッシュから返す。無ければ取得し DER として検証する。"""
-    import urllib.request
-    if isinstance(urls, str):
-        urls = [urls]
-    path = os.path.join(SECUREBOOT_STORE_DIR, cache_name)
-    try:
-        if os.path.isfile(path):
-            der = open(path, "rb").read()
-            if der[:2] == b"\x30\x82" and b"Microsoft" in der and cn_fragment.encode() in der:
-                return der
-    except OSError:
-        pass
-    last_err = "不明なエラー"
-    for url in urls:
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": "VM-Manager"})
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                der = resp.read()
-        except Exception as e:
-            last_err = str(e)
-            continue
-        if not (der[:2] == b"\x30\x82" and b"Microsoft" in der and cn_fragment.encode() in der):
-            last_err = f"想定外の内容です ({url})"
-            continue
-        try:
-            with open(path, "wb") as f:
-                f.write(der)
-            os.chmod(path, 0o644)
-        except OSError as e:
-            raise RuntimeError(f"Microsoft証明書の保存に失敗しました ({cache_name}): {e}")
-        return der
-    raise RuntimeError(f"Microsoft証明書の取得に失敗しました ({cache_name}): {last_err}")
-
-
-def _secureboot_ms_certs():
-    """KEK/db 用の MS 証明書 DER を返す。{"kek": [...], "db": [...]}。"""
-    _sb_ensure_store_dir()
-    certs = {}
-    for key in _MS_CERTS:
-        cache_name, urls, cn = _MS_CERTS[key]
-        certs[key] = _sb_fetch_cert(cache_name, urls, cn)
-    return {"kek": [certs["KEK_CA"]], "db": [certs["UEFI_CA"], certs["WIN_PCA"]]}
-
-
-def _secureboot_pk_der(vm_name):
-    """VM 固有の自己署名 PK (DER) を返す。初回のみ openssl で生成し保持する。"""
-    import subprocess
-    _sb_ensure_store_dir()
-    safe = "".join(c if (c.isalnum() or c in ("-", "_")) else "_" for c in vm_name) or "vm"
-    key_path = os.path.join(SECUREBOOT_STORE_DIR, f"{safe}_PK.key")
-    der_path = os.path.join(SECUREBOOT_STORE_DIR, f"{safe}_PK.der")
-    try:
-        if os.path.isfile(der_path) and os.path.getsize(der_path) > 0:
-            return open(der_path, "rb").read()
-    except OSError:
-        pass
-    crt_path = os.path.join(SECUREBOOT_STORE_DIR, f"{safe}_PK.crt")
-    r = subprocess.run(
-        ["openssl", "req", "-x509", "-newkey", "rsa:2048",
-         "-keyout", key_path, "-out", crt_path,
-         "-days", "36500", "-nodes", "-subj", f"/CN=VM-Manager {vm_name} Platform Key/"],
-        capture_output=True, text=True, timeout=60,
-    )
-    if r.returncode != 0:
-        raise RuntimeError(f"プラットフォーム鍵の生成に失敗しました: {(r.stderr or '').strip()}")
-    r = subprocess.run(
-        ["openssl", "x509", "-in", crt_path, "-outform", "DER", "-out", der_path],
-        capture_output=True, text=True, timeout=30,
-    )
-    if r.returncode != 0:
-        raise RuntimeError("プラットフォーム鍵のDER変換に失敗しました")
-    try:
-        os.chmod(key_path, 0o600)
-        try:
-            os.remove(crt_path)
-        except OSError:
-            pass
-    except OSError:
-        pass
-    return open(der_path, "rb").read()
-
-
-def _sb_esl_x509(pairs):
-    """(owner_uuid_bytes, der) 列から EFI_SIGNATURE_LIST 連結を返す。"""
-    import struct
-    out = b""
-    for owner, der in pairs:
-        sig_size = 16 + len(der)
-        out += _EFI_X509_GUID + struct.pack("<III", 28 + sig_size, 0, sig_size) + owner + der
-    return out
-
-
-def _sb_efi_time_now():
-    import struct
-    import time
-    t = time.gmtime()
-    return struct.pack("<HBBBBBBIHBB", t.tm_year, t.tm_mon, t.tm_mday,
-                       t.tm_hour, t.tm_min, t.tm_sec, 0, 0, 0, 0, 0)
-
-
-def _sb_var_entry(name, guid, attrs, data, mono):
-    """認証変数ストア用の1エントリ (4バイトアライン・0xFFパディング) を返す。"""
-    import struct
-    nb = (name + "\x00").encode("utf-16-le")
-    hdr = struct.pack("<HBBIQ", 0x55AA, _EFI_VAR_ADDED, 0, attrs, mono)
-    hdr += _sb_efi_time_now()
-    hdr += struct.pack("<III", 0, len(nb), len(data))
-    hdr += guid
-    assert len(hdr) == 60
-    blob = hdr + nb + data
-    return blob + b"\xff" * ((-len(blob)) % _EFI_VAR_ALIGN)
 
 
 def _sb_store_header_offset(img):
@@ -437,8 +287,48 @@ def _sb_store_header_offset(img):
         start = j + 1
 
 
+def _sb_iter_live_vars(img, store, size):
+    """ストア内を4バイト刻みで走査し、有効 (VAR_ADDED) エントリを列挙する。
+
+    起動後の reclaim で削除済みエントリやギャップが混在しても取りこぼさない
+    よう、先頭からの連続走査ではなく再同期走査する (v1.6.1)。
+    戻り値: [(entry_off, name, guid, attrs, data)]。
+    """
+    import struct
+    end = store + size
+    off = store + 28
+    found = []
+    while off + 60 <= end and off + 60 <= len(img):
+        if img[off:off + 2] == b"\xaa\x55" and img[off + 2] == _EFI_VAR_ADDED:
+            try:
+                attrs = struct.unpack_from("<I", img, off + 4)[0]
+                nsize, dsize = struct.unpack_from("<II", img, off + 36)
+            except struct.error:
+                off += _EFI_VAR_ALIGN
+                continue
+            guid = bytes(img[off + 44:off + 60])
+            if (nsize in range(2, 513, 2) and dsize <= 4 * 1024 * 1024
+                    and off + 60 + nsize + dsize <= min(end, len(img))):
+                try:
+                    name = bytes(img[off + 60:off + 60 + nsize]).decode("utf-16-le")
+                except Exception:
+                    name = ""
+                if name and name.rstrip("\x00").isprintable():
+                    data = bytes(img[off + 60 + nsize:off + 60 + nsize + dsize])
+                    found.append((off, name.rstrip("\x00"), guid, attrs, data))
+                    off += (60 + nsize + dsize + _EFI_VAR_ALIGN - 1) & ~(_EFI_VAR_ALIGN - 1)
+                    continue
+        off += _EFI_VAR_ALIGN
+    return found
+
+
 def _sb_parse_vars(path):
-    """NVRAM ファイル内の認証変数を {name: (attrs, data)} で返す。失敗時は {}。"""
+    """NVRAM ファイル内の認証変数を {name: (attrs, data)} で返す。失敗時は {}。
+
+    署名データベースの照合は virt-fw-vars の実配置に合わせる:
+    PK/KEK は Global GUID、db/dbx は DB GUID (実機検証済み)。
+    v1.6.0 の誤登録 (db を DFFD511 系 GUID) は無視=未登録扱いとする。
+    """
     import struct
     try:
         with open(path, "rb") as f:
@@ -450,50 +340,39 @@ def _sb_parse_vars(path):
         if store is None:
             return {}
         size = struct.unpack_from("<I", img, store + 16)[0]
-        end = store + size
-        off = store + 28
         result = {}
-        for _ in range(4096):
-            if off + 60 > end or off + 60 > len(img):
-                break
-            sid = struct.unpack_from("<H", img, off)[0]
-            if sid == 0xFFFF:
-                break
-            if sid != 0x55AA:
-                break
-            st = img[off + 2]
-            attrs = struct.unpack_from("<I", img, off + 4)[0]
-            nsize, dsize = struct.unpack_from("<II", img, off + 36)
-            if nsize == 0 or nsize > 512 or dsize > 4 * 1024 * 1024:
-                break
-            guid = bytes(img[off + 44:off + 60])
-            try:
-                name = bytes(img[off + 60:off + 60 + nsize]).decode("utf-16-le").rstrip("\x00")
-            except Exception:
-                break
-            if not name:
-                break
-            data = bytes(img[off + 60 + nsize:off + 60 + nsize + dsize])
-            if st == _EFI_VAR_ADDED and guid == _EFI_GLOBAL_GUID:
+        for _off, name, guid, attrs, data in _sb_iter_live_vars(img, store, size):
+            if name in ("PK", "KEK"):
+                # virt-fw-vars は PK/KEK を Global GUID で書く (実機検証済み)。
+                if guid in (_EFI_GLOBAL_GUID, _EFI_IMAGE_SECURITY_DATABASE_GUID):
+                    result[name] = (attrs, data)
+            elif name in ("db", "dbx", "dbt", "dbr", "dw"):
+                if guid == _EFI_IMAGE_SECURITY_DATABASE_GUID:
+                    result[name] = (attrs, data)
+            elif guid == _EFI_GLOBAL_GUID:
                 result[name] = (attrs, data)
-            total = 60 + nsize + dsize
-            off += (total + _EFI_VAR_ALIGN - 1) & ~(_EFI_VAR_ALIGN - 1)
         return result
     except Exception:
         return {}
 
 
 def _sb_nvram_enrolled(path):
-    """PK+db 登録かつ SecureBoot=1/SetupMode=0 なら True。"""
+    """PK+db 登録済みなら True。SB/SM があれば SecureBoot=1/SetupMode=0 を要求。
+
+    virt-fw-vars の登録直後は SB/SM が未作成 (初回起動時に生成される) のため、
+    鍵の有無のみで判定する。v1.6.0 の誤登録 (旧 DB GUID) は未登録扱いとする。
+    """
     try:
         vars_ = _sb_parse_vars(path)
     except Exception:
         return False
     if "PK" not in vars_ or "db" not in vars_:
         return False
-    sb = vars_.get("SecureBoot", (0, b""))[1]
-    sm = vars_.get("SetupMode", (0, b""))[1]
-    return sb[:1] == b"\x01" and sm[:1] == b"\x00"
+    if "SecureBoot" in vars_ and vars_["SecureBoot"][1][:1] != b"\x01":
+        return False
+    if "SetupMode" in vars_ and vars_["SetupMode"][1][:1] != b"\x00":
+        return False
+    return True
 
 
 def _sb_find_template():
@@ -527,72 +406,49 @@ def _sb_chown_qemu(path):
     subprocess.run(["chmod", "0600", path], capture_output=True, timeout=10)
 
 
-def _sb_write_enrolled_nvram(vm_name, nvram_path, template):
-    """テンプレート複写＋鍵登録した NVRAM ファイルを作成する。"""
-    import shutil
-    import uuid
-    with open(template, "rb") as f:
-        img = bytearray(f.read())
-    store = _sb_store_header_offset(img)
-    if store is None:
-        raise RuntimeError("NVRAM テンプレートの変数ストアが見つかりません")
-    base = store + 28
-    if img[base:base + 4] != b"\xff\xff\xff\xff":
-        raise RuntimeError("NVRAM テンプレートの変数ストアが空ではありません")
-    certs = _secureboot_ms_certs()
-    pk_der = _secureboot_pk_der(vm_name)
-    entries = [
-        ("PK", _EFI_GLOBAL_GUID, 0x27,
-         _sb_esl_x509([(uuid.uuid4().bytes_le, pk_der)]), 1),
-        ("KEK", _EFI_GLOBAL_GUID, 0x27,
-         _sb_esl_x509([(uuid.uuid4().bytes_le, d) for d in certs["kek"]]), 2),
-        ("db", _EFI_GLOBAL_GUID, 0x27,
-         _sb_esl_x509([(uuid.uuid4().bytes_le, d) for d in certs["db"]]), 3),
-        ("SecureBoot", _EFI_GLOBAL_GUID, 0x06, b"\x01", 4),
-        ("SetupMode", _EFI_GLOBAL_GUID, 0x06, b"\x00", 5),
-        ("SecureBootEnable", _EFI_GLOBAL_GUID, 0x03, b"\x01", 6),
-    ]
-    size = int.from_bytes(img[store + 16:store + 20], "little")
-    off = base
-    for name, guid, attrs, data, mono in entries:
-        blob = _sb_var_entry(name, guid, attrs, data, mono)
-        if off + len(blob) >= store + size:
-            raise RuntimeError("NVRAM 変数ストアの空きが不足しています")
-        img[off:off + len(blob)] = blob
-        off += len(blob)
-    tmp = nvram_path + ".sbnew"
-    try:
-        with open(tmp, "wb") as f:
-            f.write(img)
-        os.replace(tmp, nvram_path)
-    finally:
-        try:
-            if os.path.exists(tmp):
-                os.remove(tmp)
-        except OSError:
-            pass
-    _sb_chown_qemu(nvram_path)
-    if not _sb_nvram_enrolled(nvram_path):
-        raise RuntimeError("鍵登録後の検証に失敗しました")
-
-
 def _ensure_sb_nvram(vm_name):
-    """SB 要求 VM の NVRAM に鍵が登録済みであることを保証する。
+    """SB 要求 VM の NVRAM に鍵が登録済みであることを保証する (v1.6.1)。
 
-    テンプレート自体が鍵登録済み (Debian 系 .ms.fd) の場合は何もしない。
-    未登録なら新規作成・上書きする (ブートエントリは次回起動時に再生成される)。
+    鍵登録は virt-fw-vars (参照実装) に委譲する。v1.6.0 の自前実装では
+    db のベンダーGUID を誤っており、MS 署名ブートローダが起動できなかった。
+    virt-fw-vars は MS 証明書 (2011+2023 世代を内包) と VM 固有 PK を登録する
+    (生成 PK の秘密鍵は保持されない。再登録時は鍵が変わる)。
+    登録済みなら何もしない。未登録ならテンプレートから新規作成する
+    (Boot エントリは次回起動時に再生成される)。
     """
+    import shutil
+    import subprocess
     nvram_path = f"/var/lib/libvirt/qemu/nvram/{vm_name}_VARS.fd"
     if os.path.isfile(nvram_path) and _sb_nvram_enrolled(nvram_path):
         return
     template = _sb_find_template()
     if _sb_nvram_enrolled(template):
         if not os.path.isfile(nvram_path):
-            import shutil
             shutil.copyfile(template, nvram_path)
             _sb_chown_qemu(nvram_path)
         return
-    _sb_write_enrolled_nvram(vm_name, nvram_path, template)
+    if shutil.which("virt-fw-vars") is None:
+        raise RuntimeError(
+            "virt-fw-vars が見つかりません。Secure Boot の鍵登録に必要です "
+            "(CachyOS/Arch: sudo pacman -S virt-firmware)")
+    if os.path.isfile(nvram_path):
+        try:
+            os.remove(nvram_path)
+        except OSError as e:
+            raise RuntimeError(f"NVRAM の作り直しに失敗しました: {e}")
+    cmd = ["virt-fw-vars", "-i", template, "-o", nvram_path,
+           "--enroll-microsoft", "--microsoft-db", "all", "--microsoft-kek", "all",
+           "--enroll-generate", f"VM-Manager {vm_name} Platform Key", "--sb"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        raise RuntimeError(f"鍵登録に失敗しました (virt-fw-vars): {e}")
+    if r.returncode != 0:
+        detail = ((r.stderr or "") + "\n" + (r.stdout or "")).strip()[-500:]
+        raise RuntimeError(f"鍵登録に失敗しました (virt-fw-vars): {detail}")
+    _sb_chown_qemu(nvram_path)
+    if not _sb_nvram_enrolled(nvram_path):
+        raise RuntimeError("鍵登録後の検証に失敗しました")
 
 
 def _fix_vol_perms(path):
@@ -1076,25 +932,9 @@ def vm_edit(name):
     try:
         import subprocess, tempfile
 
-        old_xml_str = dom.XMLDesc(0)
-        old_root = ET.fromstring(old_xml_str)
-        old_firmware_el = old_root.find(".//firmware")
-        old_secure_boot = False
-        if old_firmware_el is not None:
-            for feat in old_firmware_el.findall("feature"):
-                if feat.get("name") == "secure-boot" and feat.get("enabled") == "yes":
-                    old_secure_boot = True
-                    break
-
-        new_uefi = config.get("uefi", False)
-        new_secure_boot = config.get("secure_boot", False)
-
-        if old_secure_boot != new_secure_boot:
-            nvram_path = f"/var/lib/libvirt/qemu/nvram/{name}_VARS.fd"
-            subprocess.run(["sudo", "rm", "-f", nvram_path], capture_output=True, timeout=5)
-
         if _want_secure_boot(config):
-            # CachyOS/Arch では空テンプレートのため鍵登録が必須 (v1.6.0)。
+            # CachyOS/Arch では空テンプレートのため鍵登録が必須。
+            # 既存 NVRAM には追記する (Boot エントリ保持のため削除しない・v1.6.1)。
             # define 前に実施し、失敗時は旧定義を残したままエラーを返す。
             try:
                 _ensure_sb_nvram(name)

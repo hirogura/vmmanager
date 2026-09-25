@@ -33,7 +33,7 @@ sudo /tmp/install-vmmanager.sh
 アプリ本体 (`app.py`) も実行時に OS 差異を自動吸収します（`/etc/os-release` による判別 + 実在ファイルの検出）:
 
 - OVMF パス: Debian (`/usr/share/OVMF/OVMF_CODE_4M*.fd`) と Arch (`/usr/share/edk2/x64/OVMF_CODE*.4m.fd`) の両方から実在ファイルを検出
-- Secure Boot: `secure-boot` のみ要求し `enrolled-keys=yes` は付けない（CachyOS/Arch のファームウェア記述子に `enrolled-keys` が無く define 失敗するため。Debian/Ubuntu でも同一テンプレートが選ばれる）。`<smm state='on'/>` を自動付与し、Q35系以外のマシンタイプでは作成・編集時にエラーを返す。旧形式の定義は起動時に自動修復する。CachyOS/Arch の VARS テンプレートは鍵未登録（空ストア）のため、SB 要求時は VM ごとの NVRAM へ PK（VM固有・自己署名）/ KEK・db（Microsoft 公式証明書を初回取得・`/var/lib/vm-manage/secureboot/` にキャッシュ）を登録し、SecureBoot=1/SetupMode=0 として実際に実施させる。未登録の既存 VM は詳細画面に「鍵未登録のため未実施」と表示し、編集保存で登録される
+- Secure Boot: `secure-boot` のみ要求し `enrolled-keys=yes` は付けない（CachyOS/Arch のファームウェア記述子に `enrolled-keys` が無く define 失敗するため。Debian/Ubuntu でも同一テンプレートが選ばれる）。`<smm state='on'/>` を自動付与し、Q35系以外のマシンタイプでは作成・編集時にエラーを返す。旧形式の定義は起動時に自動修復する。CachyOS/Arch の VARS テンプレートは鍵未登録（空ストア）のため、SB 要求時は `virt-fw-vars`（`virt-firmware` パッケージ）で VM ごとの NVRAM へ鍵登録する（MS 証明書 2011+2023 世代を内包・VM 固有 PK を自動生成。生成 PK の秘密鍵は保持されない）。自前実装（v1.6.0）では db のベンダーGUID を誤っており MS 署名ブートローダが起動できなかったため v1.6.1 で参照実装に委譲した。未登録の既存 VM は詳細画面に「鍵未登録のため未実施」と表示し、編集保存で登録される
 - `<seclabel model='apparmor'>`: AppArmor が有効なホストでのみ付与（CachyOS では省略し libvirt の自動付与に任せる）
 - ボリュームの所有者: `libvirt-qemu:kvm` → `libvirt-qemu:libvirt` → `qemu:kvm` → `root:kvm` の順にフォールバック
 - noVNC / websockify: `/usr/share/novnc`・`/usr/share/webapps/novnc`・`PATH` 上の `websockify` 等から自動検出

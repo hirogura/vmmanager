@@ -294,7 +294,8 @@ if [ "${DISTRO_FAMILY}" = "arch" ]; then
         git \
         wget \
         psmisc \
-        lsof
+        lsof \
+        virt-firmware
 else
     echo "[1/9] システムパッケージをインストール中... (apt)"
     export DEBIAN_FRONTEND=noninteractive
@@ -320,6 +321,10 @@ else
         sudo \
         curl \
         git
+    # Secure Boot 鍵登録用の virt-fw-vars (無ければ SB 要求 VM の作成時に明示エラー)。
+    # ディストリビューションによりパッケージが無い場合があるため best-effort。
+    apt_install_with_retry -qq virt-firmware \
+        || echo "警告: virt-firmware をインストールできませんでした。Secure Boot の鍵登録には手動導入が必要です"
 fi
 
 echo "[2/9] libvirtd サービスを有効化中..."

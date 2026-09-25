@@ -61,7 +61,7 @@
         </div>
         <div class="checkbox-group" id="secureboot-group" style="{% if not vm_config.uefi %}display:none{% endif %}">
             <input type="checkbox" name="secure_boot" id="secure_boot" {% if vm_config.secure_boot %}checked{% endif %} {% if is_active %}disabled{% endif %}>
-            <label for="secure_boot">Secure Boot</label>
+            <label for="secure_boot">Secure Boot <span style="color:var(--text-muted);font-size:10px">(Q35必須)</span></label>
         </div>
     </div>
 </div>

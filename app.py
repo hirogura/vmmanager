@@ -118,6 +118,88 @@ def _define_xml(conn, xml_str):
     return conn.defineXML(_strip_unsupported_seclabels(xml_str))
 
 
+# ============================================================
+# Secure Boot (CachyOS/Arch 対応)
+# CachyOS/Arch の edk2-ovmf ファームウェア記述子
+# (/usr/share/qemu/firmware/50-edk2-ovmf-x86_64-secure-4m.json) は
+# "secure-boot" タグのみで "enrolled-keys" タグを持たないため、
+# <feature enabled='yes' name='enrolled-keys'/> を要求すると
+# "Unable to find 'efi' firmware that is compatible ..." で define 失敗する
+# (Debian/Ubuntu の記述子には enrolled-keys があるため従来の XML で動いていた)。
+# そのため enrolled-keys=yes は要求せず secure-boot のみ要求する。
+# 省略時はフィルタ無し(=要求しない)扱いなので、Debian/Ubuntu でも
+# 同じ ms/secboot テンプレートが選ばれ、ゲスト動作は従来と同一になる。
+# また secboot ファームウェアは requires-smm のため <smm state='on'/> が必須で、
+# 対象マシンは pc-q35-* のみに限られる (i440fx では define 失敗する)。
+# ============================================================
+SECURE_BOOT_Q35_HINT = "Secure BootにはQ35マシンタイプが必要です（例: pc-q35-11.1）"
+
+
+def _want_secure_boot(config):
+    """UEFI 有効かつ Secure Boot 要求の場合のみ True。"""
+    return bool(config.get("uefi") and config.get("secure_boot"))
+
+
+def _secure_boot_machine_error(machine):
+    """Secure Boot に非対応のマシンタイプならエラーメッセージ、対応なら None。"""
+    if machine and "q35" in machine:
+        return None
+    return f"{SECURE_BOOT_Q35_HINT}。マシンタイプをQ35系に変更してください"
+
+
+def _ensure_smm_feature(lines):
+    """Secure Boot 用に <smm state='on'/> 行を追加する (features ブロック内用)。"""
+    lines.append("    <smm state='on'/>")
+
+
+def _repair_secure_boot_xml(xml_str):
+    """起動失敗した既存定義の Secure Boot 記述をホスト対応形に修復する。
+
+    - <feature enabled='yes' name='enrolled-keys'/> を除去
+      (CachyOS/Arch のファームウェア記述子に enrolled-keys が無く define 失敗するため)
+    - <features> に <smm state='on'/> を付与 (secboot ファームウェアは requires-smm)
+    修正が発生した場合のみ修復後 XML を返し、不要なら None を返す。
+    マシンタイプが非Q35の場合は修復不能のため None を返す。
+    """
+    try:
+        root = ET.fromstring(xml_str)
+    except ET.ParseError:
+        return None
+    os_el = root.find("os")
+    if os_el is None:
+        return None
+    type_el = os_el.find("type")
+    machine = type_el.get("machine", "") if type_el is not None else ""
+    if machine and "q35" not in machine:
+        return None
+    changed = False
+    firmware_el = os_el.find("firmware")
+    if firmware_el is not None:
+        for feat in list(firmware_el):
+            if (feat.tag == "feature" and (feat.get("name", "") or "").lower() == "enrolled-keys"
+                    and (feat.get("enabled", "") or "").lower() == "yes"):
+                firmware_el.remove(feat)
+                changed = True
+    features_el = root.find("features")
+    if features_el is None:
+        features_el = ET.SubElement(root, "features")
+        changed = True
+    smm_el = features_el.find("smm")
+    if smm_el is None:
+        smm_el = ET.SubElement(features_el, "smm")
+        smm_el.set("state", "on")
+        changed = True
+    elif (smm_el.get("state", "") or "").lower() != "on":
+        smm_el.set("state", "on")
+        changed = True
+    if not changed:
+        return None
+    try:
+        return ET.tostring(root, encoding="unicode")
+    except Exception:
+        return None
+
+
 def _ovmf_pair(secure):
     """CODE/VARS の実在ペアを返す。Debian と Arch(CachyOS) の両対応。"""
     if secure:
@@ -362,6 +444,10 @@ def vm_detail(name):
             if feat.get("name") == "secure-boot" and feat.get("enabled") == "yes":
                 vm_config["secure_boot"] = True
                 break
+    if not vm_config["secure_boot"] and loader_el is not None:
+        # 旧形式 (firmware='efi' 無し・loader secure='yes') の Secure Boot 定義も検出する。
+        if (loader_el.get("secure", "") or "").lower() == "yes":
+            vm_config["secure_boot"] = True
     redir_count = 0
     for rd in root.findall(".//redirdev"):
         if rd.get("type") == "spicevmc":
@@ -610,6 +696,12 @@ def vm_edit(name):
 
     config["uuid"] = dom.UUIDString()
 
+    if _want_secure_boot(config):
+        _sb_err = _secure_boot_machine_error(config.get("machine", ""))
+        if _sb_err:
+            conn.close()
+            return jsonify({"error": _sb_err}), 400
+
     # 既存のNICのMACを引き継ぐ（クライアントから送られなかった場合の保険）
     if not config.get("net_mac"):
         try:
@@ -677,6 +769,8 @@ def _build_edit_xml(config):
     arch = config.get("arch", "x86_64")
     machine = config.get("machine", "pc-q35-10.2")
     uefi = config.get("uefi", False)
+    if _want_secure_boot(config) and _secure_boot_machine_error(machine):
+        return None
 
     vnc_enabled = config.get("vnc_enabled", True)
     vnc_port = config.get("vnc_port", "") or "-1"
@@ -734,7 +828,8 @@ def _build_edit_xml(config):
             lines.append("  <os firmware='efi'>")
             lines.append(f"    <type arch='{arch}' machine='{machine}'>hvm</type>")
             lines.append("    <firmware>")
-            lines.append("      <feature enabled='yes' name='enrolled-keys'/>")
+            # enrolled-keys=yes は要求しない (CachyOS/Arch の記述子に無く define 失敗するため)。
+            # 省略=フィルタ無しなので Debian/Ubuntu でも同一テンプレートが選ばれる。
             lines.append("      <feature enabled='yes' name='secure-boot'/>")
             lines.append("    </firmware>")
             lines.extend(_efi_loader_lines(name, True))
@@ -752,10 +847,13 @@ def _build_edit_xml(config):
         lines.append(f"    <type arch='{arch}' machine='{machine}'>hvm</type>")
     lines.append("  </os>")
     hyperv_enabled = config.get("hyperv_enabled", False)
+    want_secure = bool(uefi and config.get("secure_boot", False))
     if hyperv_enabled:
         lines.append("  <features>")
         lines.append("    <acpi/>")
         lines.append("    <apic/>")
+        if want_secure:
+            _ensure_smm_feature(lines)
         lines.append("    <hyperv>")
         lines.append("      <relaxed state='on'/>")
         lines.append("      <vapic state='on'/>")
@@ -778,7 +876,10 @@ def _build_edit_xml(config):
         lines.append("    <timer name='hypervclock' present='yes'/>")
         lines.append("  </clock>")
     else:
-        lines.append("  <features><acpi/><apic/></features>")
+        if want_secure:
+            lines.append("  <features><acpi/><apic/><smm state='on'/></features>")
+        else:
+            lines.append("  <features><acpi/><apic/></features>")
         lines.append("  <clock offset='utc'/>")
     lines.append("  <devices>")
 
@@ -985,6 +1086,17 @@ def vm_action(name):
                 # <seclabel model='apparmor'> が原因の起動失敗を自動修復する。
                 if "apparmor" in str(e).lower():
                     fixed_xml = _strip_unsupported_seclabels(dom.XMLDesc(0))
+                    _define_xml(conn, fixed_xml)
+                    dom = conn.lookupByName(name)
+                    dom.create()
+                elif "firmware" in str(e).lower() or "smm" in str(e).lower():
+                    # 旧形式の Secure Boot 定義
+                    # (enrolled-keys=yes 要求・smm 未指定) が原因の起動失敗を自動修復する。
+                    # CachyOS/Arch のファームウェア記述子は enrolled-keys を持たないため、
+                    # 旧定義のままでは起動できない。
+                    fixed_xml = _repair_secure_boot_xml(dom.XMLDesc(0))
+                    if fixed_xml is None:
+                        raise
                     _define_xml(conn, fixed_xml)
                     dom = conn.lookupByName(name)
                     dom.create()
@@ -1750,12 +1862,16 @@ def _build_vm_xml(config):
     uefi = config.get("uefi", False)
     secure_boot = config.get("secure_boot", False)
     boot_order = config.get("boot_order", [])
+    if uefi and secure_boot:
+        _sb_err = _secure_boot_machine_error(machine)
+        if _sb_err:
+            return None, _sb_err
     if uefi:
         if secure_boot:
             lines.append("  <os firmware='efi'>")
             lines.append(f"    <type arch='{arch}' machine='{machine}'>hvm</type>")
             lines.append("    <firmware>")
-            lines.append("      <feature enabled='yes' name='enrolled-keys'/>")
+            # enrolled-keys=yes は要求しない (CachyOS/Arch の記述子に無く define 失敗するため)。
             lines.append("      <feature enabled='yes' name='secure-boot'/>")
             lines.append("    </firmware>")
             lines.extend(_efi_loader_lines(name, True))
@@ -1786,6 +1902,8 @@ def _build_vm_xml(config):
     lines.append("  <features>")
     lines.append("    <acpi/>")
     lines.append("    <apic/>")
+    if uefi and secure_boot:
+        _ensure_smm_feature(lines)
     if hyperv_enabled:
         lines.append("    <hyperv>")
         lines.append("      <relaxed state='on'/>")

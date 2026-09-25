@@ -33,6 +33,7 @@ sudo /tmp/install-vmmanager.sh
 アプリ本体 (`app.py`) も実行時に OS 差異を自動吸収します（`/etc/os-release` による判別 + 実在ファイルの検出）:
 
 - OVMF パス: Debian (`/usr/share/OVMF/OVMF_CODE_4M*.fd`) と Arch (`/usr/share/edk2/x64/OVMF_CODE*.4m.fd`) の両方から実在ファイルを検出
+- Secure Boot: `secure-boot` のみ要求し `enrolled-keys=yes` は付けない（CachyOS/Arch のファームウェア記述子に `enrolled-keys` が無く define 失敗するため。Debian/Ubuntu でも同一テンプレートが選ばれる）。`<smm state='on'/>` を自動付与し、Q35系以外のマシンタイプでは作成・編集時にエラーを返す。旧形式の定義は起動時に自動修復する
 - `<seclabel model='apparmor'>`: AppArmor が有効なホストでのみ付与（CachyOS では省略し libvirt の自動付与に任せる）
 - ボリュームの所有者: `libvirt-qemu:kvm` → `libvirt-qemu:libvirt` → `qemu:kvm` → `root:kvm` の順にフォールバック
 - noVNC / websockify: `/usr/share/novnc`・`/usr/share/webapps/novnc`・`PATH` 上の `websockify` 等から自動検出

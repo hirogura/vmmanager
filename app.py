@@ -3201,7 +3201,7 @@ def api_upload_delete():
     return jsonify({"success": True})
 
 
-_download_state = {"running": False, "success": None, "log": "", "filename": "", "path": "", "cancelled": False}
+_download_state = {"running": False, "success": None, "log": "", "filename": "", "path": "", "cancelled": False, "total": -1, "received": 0}
 _download_lock = threading.Lock()
 _download_proc = None
 
@@ -3231,12 +3231,25 @@ def api_download_iso():
     with _download_lock:
         if _download_state["running"]:
             return jsonify({"error": "ダウンロードが既に実行中です"}), 409
+        # /opt/ventoy-ui と同様に、事前の HEAD で総サイズを取得して進捗バーに使う。
+        # 取得失敗時は -1 (不明) のままダウンロードを開始する。
+        total = -1
+        try:
+            import urllib.request
+            head_req = urllib.request.Request(
+                url, method="HEAD", headers={"User-Agent": "VM-Manager"})
+            with urllib.request.urlopen(head_req, timeout=15) as head_resp:
+                length = head_resp.headers.get("Content-Length")
+                if length and str(length).isdigit():
+                    total = int(length)
+        except Exception:
+            total = -1
         proc = subprocess.Popen(
             ["wget", "-O", dest, url],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
         _download_proc = proc
-        _download_state.update(running=True, success=None, log="", filename=filename, path=dest, cancelled=False)
+        _download_state.update(running=True, success=None, log="", filename=filename, path=dest, cancelled=False, total=total, received=0)
 
     def _download():
         try:
@@ -3289,9 +3302,15 @@ def api_download_iso_cancel():
 def api_download_iso_status():
     state = dict(_download_state)
     try:
-        state["size_mb"] = os.path.getsize(state["path"]) // (1024 * 1024) if os.path.isfile(state["path"]) else 0
+        received = os.path.getsize(state["path"]) if os.path.isfile(state["path"]) else 0
     except Exception:
-        state["size_mb"] = 0
+        received = 0
+    state["received"] = received
+    # size_mb は既存フロントとの互換用に残す。
+    state["size_mb"] = received // (1024 * 1024)
+    state["size_bytes"] = received
+    if "total" not in state:
+        state["total"] = -1
     return jsonify(state)
 
 

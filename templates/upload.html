@@ -1,8 +1,8 @@
 {% extends "base.html" %}
-{% block title %}ISOアップロード - VM Manager{% endblock %}
+{% block title %}ISO/qcow2管理 - VM Manager{% endblock %}
 {% block content %}
 <div class="action-bar">
-    <h1 style="margin:0"><i class="fas fa-upload"></i> ISOアップロード</h1>
+    <h1 style="margin:0"><i class="fas fa-upload"></i> ISO/qcow2管理</h1>
     <span class="spacer"></span>
 </div>
 
@@ -50,6 +50,12 @@
         <input type="text" id="dl-url" placeholder="https://example.com/path/to/image.iso" style="width:100%">
     </div>
     <div id="dl-status" style="font-size:12px;color:var(--text-secondary);margin-bottom:8px"></div>
+    <div id="dl-progress-wrap" style="display:none;margin-top:10px">
+        <div style="background:var(--bg-input);border-radius:var(--radius);height:12px;overflow:hidden">
+            <div id="dl-progress-bar" style="background:var(--accent);height:100%;width:0%;transition:width 0.3s"></div>
+        </div>
+        <div id="dl-progress-text" style="font-size:11px;color:var(--text-secondary);margin-top:4px"></div>
+    </div>
     <div class="btn-group">
         <button type="button" id="btn-download" class="btn btn-primary"><i class="fas fa-download"></i> Webからダウンロード</button>
         <button type="button" id="btn-dl-cancel" class="btn btn-secondary" disabled><i class="fas fa-stop"></i> キャンセル</button>
@@ -208,22 +214,44 @@ function pollDlStatus() {
         .then(r => r.json())
         .then(s => {
             const el = document.getElementById('dl-status');
+            const wrap = document.getElementById('dl-progress-wrap');
+            const bar = document.getElementById('dl-progress-bar');
+            const ptext = document.getElementById('dl-progress-text');
             document.getElementById('btn-dl-cancel').disabled = !s.running;
+            const received = s.received ?? ((s.size_mb || 0) * 1024 * 1024);
+            const total = s.total ?? -1;
             if (s.running) {
-                el.textContent = 'ダウンロード中: ' + s.filename + ' (' + fmtSize((s.size_mb || 0) * 1024 * 1024) + ')';
+                el.textContent = 'ダウンロード中: ' + s.filename;
+                // /opt/ventoy-ui と同様の進捗バー表示
+                wrap.style.display = 'block';
+                if (total > 0) {
+                    const pct = Math.min(100, received / total * 100);
+                    bar.style.width = pct.toFixed(1) + '%';
+                    ptext.textContent = s.filename + ': ' + fmtSize(received) + ' / ' + fmtSize(total) + ' (' + pct.toFixed(1) + '%)';
+                } else {
+                    bar.style.width = '100%';
+                    ptext.textContent = s.filename + ': ' + fmtSize(received) + ' ダウンロード中...';
+                }
                 return;
             }
             clearInterval(dlPollTimer);
             dlPollTimer = null;
             const btn = document.getElementById('btn-download');
             btn.disabled = false;
-            if (s.success === null) return;
+            if (s.success === null) {
+                wrap.style.display = 'none';
+                return;
+            }
             if (s.success) {
-                el.textContent = 'ダウンロード完了: ' + s.filename + ' (' + fmtSize((s.size_mb || 0) * 1024 * 1024) + ')';
+                bar.style.width = '100%';
+                ptext.textContent = s.filename + ': ' + fmtSize(received) + ' ダウンロード完了';
+                el.textContent = 'ダウンロード完了: ' + s.filename + ' (' + fmtSize(received) + ')';
                 loadFiles();
             } else if (s.cancelled) {
+                wrap.style.display = 'none';
                 el.textContent = 'ダウンロードをキャンセルしました';
             } else {
+                wrap.style.display = 'none';
                 el.textContent = 'ダウンロード失敗: ' + (s.log || '不明なエラー');
                 loadFiles();
             }
@@ -249,9 +277,14 @@ document.getElementById('btn-download').addEventListener('click', function() {
             return;
         }
         document.getElementById('dl-status').textContent = 'ダウンロード開始: ' + data.filename;
+        document.getElementById('dl-progress-wrap').style.display = 'block';
+        document.getElementById('dl-progress-bar').style.width = '0%';
+        document.getElementById('dl-progress-text').textContent = 'ダウンロード開始: ' + data.filename;
         this.disabled = true;
         document.getElementById('btn-dl-cancel').disabled = false;
+        if (dlPollTimer) clearInterval(dlPollTimer);
         dlPollTimer = setInterval(pollDlStatus, 1000);
+        pollDlStatus();
     })
     .catch(err => alert('通信エラー: ' + err));
 });

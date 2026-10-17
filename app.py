@@ -3073,6 +3073,34 @@ def _pick_tailnet_ip(interfaces):
     return ips[0] if ips else None
 
 
+def _tailnet_suffix():
+    """テールネットのDNS接尾辞(例: tailf682b.ts.net)を tailscale status --json から取得。"""
+    try:
+        import json
+        import subprocess
+        r = subprocess.run(
+            ["tailscale", "status", "--json"],
+            capture_output=True, text=True, timeout=5
+        )
+        if r.returncode == 0:
+            dns = (json.loads(r.stdout).get("Self") or {}).get("DNSName", "")
+            dns = dns.rstrip(".")
+            parts = dns.split(".", 1)
+            if len(parts) == 2 and parts[1]:
+                return parts[1]
+    except Exception:
+        pass
+    return None
+
+
+def _reach(host, port=3355, timeout=3):
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 @app.route("/api/vm/<name>/serv-ui")
 def api_vm_serv_ui(name):
     conn = get_conn()
@@ -3102,17 +3130,14 @@ def api_vm_serv_ui(name):
     except Exception:
         interfaces = []
     conn.close()
+    suffix = _tailnet_suffix()
+    hostname = f"{name}.{suffix}" if suffix else None
+    if hostname and _reach(hostname):
+        return jsonify({"ok": True, "url": f"https://{hostname}:3355"})
     ip = _pick_tailnet_ip(interfaces)
-    if not ip:
-        return jsonify({"ok": False, "url": None})
-    url = f"https://{ip}:3355"
-    ok = False
-    try:
-        with socket.create_connection((ip, 3355), timeout=3):
-            ok = True
-    except OSError:
-        ok = False
-    return jsonify({"ok": ok, "url": url if ok else None})
+    if ip and _reach(ip):
+        return jsonify({"ok": True, "url": f"https://{ip}:3355"})
+    return jsonify({"ok": False, "url": None})
 
 
 @app.route("/api/vm/<name>/console-proxy", methods=["POST", "DELETE"])

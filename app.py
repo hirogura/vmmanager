@@ -3064,6 +3064,57 @@ def api_vm_ip(name):
         return jsonify({"interfaces": [], "error": str(e)})
 
 
+def _pick_tailnet_ip(interfaces):
+    """tailscale IP (100.64.0.0/10) を優先して選ぶ。無ければ先頭のIPv4。"""
+    ips = [i.get("ip") for i in interfaces if i.get("ip")]
+    tails = [ip for ip in ips if ip.startswith("100.")]
+    if tails:
+        return tails[0]
+    return ips[0] if ips else None
+
+
+@app.route("/api/vm/<name>/serv-ui")
+def api_vm_serv_ui(name):
+    conn = get_conn()
+    try:
+        dom = conn.lookupByName(name)
+    except libvirt.libvirtError:
+        conn.close()
+        return jsonify({"error": f"VM '{name}' が見つかりません"}), 404
+    if not dom.isActive():
+        conn.close()
+        return jsonify({"ok": False, "url": None})
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["sudo", "virsh", "domifaddr", name],
+            capture_output=True, text=True, timeout=10
+        )
+        interfaces = []
+        if r.returncode == 0:
+            lines = r.stdout.strip().split("\n")
+            if len(lines) > 1:
+                for line in lines[1:]:
+                    parts = line.split()
+                    if len(parts) >= 4:
+                        addr = parts[3].split("/")[0]
+                        interfaces.append({"ip": addr})
+    except Exception:
+        interfaces = []
+    conn.close()
+    ip = _pick_tailnet_ip(interfaces)
+    if not ip:
+        return jsonify({"ok": False, "url": None})
+    url = f"https://{ip}:3355"
+    ok = False
+    try:
+        with socket.create_connection((ip, 3355), timeout=3):
+            ok = True
+    except OSError:
+        ok = False
+    return jsonify({"ok": ok, "url": url if ok else None})
+
+
 @app.route("/api/vm/<name>/console-proxy", methods=["POST", "DELETE"])
 def console_proxy(name):
     if request.method == "DELETE":

@@ -36,6 +36,7 @@
                 <button class="btn btn-info btn-sm" onclick='vmAction({{ vm.name|tojson }}, "reboot")'><i class="fas fa-redo"></i> 再起動</button>
             {% endif %}
             <a href="/vm/{{ vm.name }}" class="btn btn-info btn-sm"><i class="fas fa-cog"></i> 設定</a>
+            <button class="btn btn-info btn-sm serv-ui-btn" data-vm="{{ vm.name }}" {% if vm.state != 'running' %}disabled title="VMが停止中のため無効"{% else %}disabled title="稼働確認中..."{% endif %}><i class="fas fa-window-maximize"></i> serv/cachy-UI</button>
         </div>
     </div>
     {% endfor %}
@@ -86,6 +87,22 @@ document.addEventListener('DOMContentLoaded', function() {
             el.textContent = '-';
             el.style.fontFamily = '';
         });
+    });
+});
+
+document.querySelectorAll('.serv-ui-btn').forEach(btn => {
+    if (btn.disabled && btn.title === 'VMが停止中のため無効') return;
+    const name = btn.dataset.vm;
+    fetch(`/api/vm/${encodeURIComponent(name)}/serv-ui`).then(r => r.json()).then(data => {
+        if (data.ok && data.url) {
+            btn.disabled = false;
+            btn.title = data.url;
+            btn.addEventListener('click', () => window.open(data.url, '_blank'));
+        } else {
+            btn.title = 'serv/cachy-UI 未稼働';
+        }
+    }).catch(() => {
+        btn.title = '稼働確認に失敗';
     });
 });
 

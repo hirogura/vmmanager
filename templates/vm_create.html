@@ -17,8 +17,17 @@
         <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">
             <input type="text" name="name" required placeholder="例: win11, ubuntu2604" style="flex:1;min-width:200px">
             <div class="checkbox-group" style="white-space:nowrap">
-                <input type="checkbox" name="hyperv_enabled" id="hyperv_enabled">
+                <input type="checkbox" name="hyperv_enabled" id="hyperv_enabled" onchange="if(this.checked)document.getElementById('clock_tuning').checked=true">
                 <label for="hyperv_enabled">Hyper-V拡張を有効化（Windows11などをインストールする場合はOnに）</label>
+            </div>
+            <div class="checkbox-group" style="white-space:nowrap">
+                <input type="checkbox" name="clock_tuning" id="clock_tuning">
+                <label for="clock_tuning">clock設定（rtc/pit/hpet/hypervclock）</label>
+            </div>
+            <div class="checkbox-group" style="white-space:nowrap">
+                <input type="checkbox" name="cpu_pinning" id="cpu_pinning" onchange="document.getElementById('cpu_pinning_set').style.display=this.checked?'inline-block':'none'">
+                <label for="cpu_pinning">CPUピンニング</label>
+                <input type="text" name="cpu_pinning_set" id="cpu_pinning_set" placeholder="例: 0-3" style="width:70px;display:none">
             </div>
             <div class="checkbox-group" style="white-space:nowrap">
                 <input type="checkbox" name="usb_tablet" id="usb_tablet">
@@ -192,6 +201,9 @@ function collectFormData() {
         existing_disk_path: f.elements['existing_disk_path'] ? f.elements['existing_disk_path'].value : '',
         tpm_enabled: f.elements['tpm_enabled'].checked,
         hyperv_enabled: f.elements['hyperv_enabled'].checked,
+        clock_tuning: f.elements['clock_tuning'].checked,
+        cpu_pinning: f.elements['cpu_pinning'].checked,
+        cpu_pinning_set: f.elements['cpu_pinning_set'].value.trim(),
         usb_tablet: f.elements['usb_tablet'].checked,
         net_mac: f.elements['net_mac'].value.trim()
     };

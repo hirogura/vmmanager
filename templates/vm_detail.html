@@ -135,6 +135,15 @@
             <input type="checkbox" name="hyperv_enabled" id="hyperv_enabled" {% if vm_config.hyperv_enabled %}checked{% endif %} {% if is_active %}disabled{% endif %}>
             <label for="hyperv_enabled">Hyper-V拡張（Windowsゲスト用）</label>
         </div>
+        <div class="checkbox-group">
+            <input type="checkbox" name="clock_tuning" id="clock_tuning" {% if vm_config.clock_tuning %}checked{% endif %} {% if is_active %}disabled{% endif %}>
+            <label for="clock_tuning">clock設定（rtc/pit/hpet/hypervclock）</label>
+        </div>
+        <div class="checkbox-group">
+            <input type="checkbox" name="cpu_pinning" id="cpu_pinning" {% if vm_config.cpu_pinning %}checked{% endif %} {% if is_active %}disabled{% endif %} onchange="document.getElementById('cpu_pinning_set').style.display=this.checked?'inline-block':'none'">
+            <label for="cpu_pinning">CPUピンニング</label>
+            <input type="text" name="cpu_pinning_set" id="cpu_pinning_set" value="{{ vm_config.cpu_pinning_set or '' }}" placeholder="例: 0-3" style="width:70px{% if not vm_config.cpu_pinning %};display:none{% endif %}" {% if is_active %}disabled{% endif %}>
+        </div>
     </div>
 </div>
 
@@ -749,6 +758,9 @@ async function collectFormData() {
         tpm_enabled: fd.has('tpm_enabled'),
         secure_boot: fd.has('secure_boot'),
         hyperv_enabled: fd.has('hyperv_enabled'),
+        clock_tuning: fd.has('clock_tuning'),
+        cpu_pinning: fd.has('cpu_pinning'),
+        cpu_pinning_set: fd.get('cpu_pinning_set') || '',
         sound_enabled: fd.has('sound_enabled'),
         channel_spice: fd.has('channel_spice'),
         usb_tablet: fd.has('usb_tablet'),

@@ -640,7 +640,13 @@ def vm_detail(name):
         "usb_redirector_1": False,
         "usb_redirector_2": False,
         "hyperv_enabled": root.find(".//features/hyperv") is not None,
+        "clock_tuning": root.find(".//clock/timer[@name='hypervclock']") is not None,
+        "cpu_pinning": root.find(".//cputune/vcpupin") is not None,
+        "cpu_pinning_set": "",
     }
+    _vcpupin_el = root.find(".//cputune/vcpupin")
+    if _vcpupin_el is not None:
+        vm_config["cpu_pinning_set"] = _vcpupin_el.get("cpuset", "")
     firmware_el = root.find(".//firmware")
     if firmware_el is not None:
         for feat in firmware_el.findall("feature"):
@@ -1024,6 +1030,13 @@ def _build_edit_xml(config):
     lines.append(f"  <memory unit='KiB'>{memory_kb}</memory>")
     lines.append(f"  <currentMemory unit='KiB'>{memory_kb}</currentMemory>")
     lines.append(f"  <vcpu placement='static'>{vcpus}</vcpu>")
+    cpu_pinning = config.get("cpu_pinning", False)
+    cpu_pinning_set = (config.get("cpu_pinning_set") or "").strip()
+    if cpu_pinning and cpu_pinning_set:
+        lines.append("  <cputune>")
+        for _i in range(vcpus):
+            lines.append(f"    <vcpupin vcpu='{_i}' cpuset='{cpu_pinning_set}'/>")
+        lines.append("  </cputune>")
     lines.append("  <cpu mode='host-passthrough' check='none'>")
     lines.append(f"    <topology sockets='1' dies='1' cores='{vcpus}' threads='1'/>")
     lines.append("  </cpu>")
@@ -1052,6 +1065,7 @@ def _build_edit_xml(config):
         lines.append(f"    <type arch='{arch}' machine='{machine}'>hvm</type>")
     lines.append("  </os>")
     hyperv_enabled = config.get("hyperv_enabled", False)
+    clock_tuning = config.get("clock_tuning", hyperv_enabled)
     want_secure = bool(uefi and config.get("secure_boot", False))
     if hyperv_enabled:
         lines.append("  <features>")
@@ -1074,18 +1088,29 @@ def _build_edit_xml(config):
         lines.append("      <ipi state='on'/>")
         lines.append("    </hyperv>")
         lines.append("  </features>")
-        lines.append("  <clock offset='localtime'>")
-        lines.append("    <timer name='rtc' tickpolicy='catchup'/>")
-        lines.append("    <timer name='pit' tickpolicy='delay'/>")
-        lines.append("    <timer name='hpet' present='no'/>")
-        lines.append("    <timer name='hypervclock' present='yes'/>")
-        lines.append("  </clock>")
+        if clock_tuning:
+            lines.append("  <clock offset='localtime'>")
+            lines.append("    <timer name='rtc' tickpolicy='catchup'/>")
+            lines.append("    <timer name='pit' tickpolicy='delay'/>")
+            lines.append("    <timer name='hpet' present='no'/>")
+            lines.append("    <timer name='hypervclock' present='yes'/>")
+            lines.append("  </clock>")
+        else:
+            lines.append("  <clock offset='localtime'/>")
     else:
         if want_secure:
             lines.append("  <features><acpi/><apic/><smm state='on'/></features>")
         else:
             lines.append("  <features><acpi/><apic/></features>")
-        lines.append("  <clock offset='utc'/>")
+        if clock_tuning:
+            lines.append("  <clock offset='localtime'>")
+            lines.append("    <timer name='rtc' tickpolicy='catchup'/>")
+            lines.append("    <timer name='pit' tickpolicy='delay'/>")
+            lines.append("    <timer name='hpet' present='no'/>")
+            lines.append("    <timer name='hypervclock' present='yes'/>")
+            lines.append("  </clock>")
+        else:
+            lines.append("  <clock offset='utc'/>")
     lines.append("  <devices>")
 
     if disk_order:
@@ -2087,6 +2112,13 @@ def _build_vm_xml(config):
     lines.append(f"  <memory unit='KiB'>{memory_kb}</memory>")
     lines.append(f"  <currentMemory unit='KiB'>{memory_kb}</currentMemory>")
     lines.append(f"  <vcpu placement='static'>{vcpus}</vcpu>")
+    cpu_pinning = config.get("cpu_pinning", False)
+    cpu_pinning_set = (config.get("cpu_pinning_set") or "").strip()
+    if cpu_pinning and cpu_pinning_set:
+        lines.append("  <cputune>")
+        for _i in range(vcpus):
+            lines.append(f"    <vcpupin vcpu='{_i}' cpuset='{cpu_pinning_set}'/>")
+        lines.append("  </cputune>")
     lines.append("  <cpu mode='host-passthrough' check='none'>")
     lines.append(f"    <topology sockets='1' dies='1' cores='{vcpus}' threads='1'/>")
     lines.append("  </cpu>")
@@ -2130,6 +2162,7 @@ def _build_vm_xml(config):
             lines.append("    <boot dev='hd'/>")
     lines.append("  </os>")
     hyperv_enabled = config.get("hyperv_enabled", False)
+    clock_tuning = config.get("clock_tuning", hyperv_enabled)
     lines.append("  <features>")
     lines.append("    <acpi/>")
     lines.append("    <apic/>")
@@ -2151,7 +2184,7 @@ def _build_vm_xml(config):
         lines.append("      <ipi state='on'/>")
         lines.append("    </hyperv>")
     lines.append("  </features>")
-    if hyperv_enabled:
+    if clock_tuning:
         lines.append("  <clock offset='localtime'>")
         lines.append("    <timer name='rtc' tickpolicy='catchup'/>")
         lines.append("    <timer name='pit' tickpolicy='delay'/>")

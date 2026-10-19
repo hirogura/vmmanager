@@ -2184,7 +2184,17 @@ def _build_vm_xml(config):
         lines.append("      <ipi state='on'/>")
         lines.append("    </hyperv>")
     lines.append("  </features>")
-    if clock_tuning:
+    if hyperv_enabled:
+        if clock_tuning:
+            lines.append("  <clock offset='localtime'>")
+            lines.append("    <timer name='rtc' tickpolicy='catchup'/>")
+            lines.append("    <timer name='pit' tickpolicy='delay'/>")
+            lines.append("    <timer name='hpet' present='no'/>")
+            lines.append("    <timer name='hypervclock' present='yes'/>")
+            lines.append("  </clock>")
+        else:
+            lines.append("  <clock offset='localtime'/>")
+    elif clock_tuning:
         lines.append("  <clock offset='localtime'>")
         lines.append("    <timer name='rtc' tickpolicy='catchup'/>")
         lines.append("    <timer name='pit' tickpolicy='delay'/>")

@@ -152,6 +152,22 @@ def _ensure_smm_feature(lines):
     lines.append("    <smm state='on'/>")
 
 
+def _vhost_available():
+    """vhost-net が使えるホストかを返す。virtio-net 高速化の適用可否判定用。"""
+    try:
+        return os.path.exists("/dev/vhost-net")
+    except OSError:
+        return False
+
+
+def _disk_driver_line(driver_type, target_bus, hyperv_enabled):
+    """ディスク driver 行を返す。Windows(Hyper-V拡張ON)+virtio時は discard unmap を付与し
+    TRIM を有効化して qcow2 の肥大化を抑え長期性能を維持する (v1.8.2)。"""
+    if hyperv_enabled and target_bus == "virtio":
+        return f"      <driver name='qemu' type='{driver_type}' discard='unmap'/>"
+    return f"      <driver name='qemu' type='{driver_type}'/>"
+
+
 def _repair_secure_boot_xml(xml_str):
     """起動失敗した既存定義の Secure Boot 記述をホスト対応形に修復する。
 
@@ -1087,6 +1103,8 @@ def _build_edit_xml(config):
         lines.append("      <tlbflush state='on'/>")
         lines.append("      <ipi state='on'/>")
         lines.append("    </hyperv>")
+        # Windows時は kvm ドライバの ioapic で割り込み処理を高速化 (v1.8.2)。
+        lines.append("    <ioapic driver='kvm'/>")
         lines.append("  </features>")
         if clock_tuning:
             lines.append("  <clock offset='localtime'>")
@@ -1094,9 +1112,12 @@ def _build_edit_xml(config):
             lines.append("    <timer name='pit' tickpolicy='delay'/>")
             lines.append("    <timer name='hpet' present='no'/>")
             lines.append("    <timer name='hypervclock' present='yes'/>")
+            lines.append("    <timer name='tsc' present='yes' mode='native'/>")
             lines.append("  </clock>")
         else:
-            lines.append("  <clock offset='localtime'/>")
+            lines.append("  <clock offset='localtime'>")
+            lines.append("    <timer name='tsc' present='yes' mode='native'/>")
+            lines.append("  </clock>")
     else:
         if want_secure:
             lines.append("  <features><acpi/><apic/><smm state='on'/></features>")
@@ -1125,7 +1146,7 @@ def _build_edit_xml(config):
 
     for ed in existing_disks:
         lines.append(f"    <disk type='{ed['type']}' device='{ed['device']}'>")
-        lines.append(f"      <driver name='qemu' type='{ed['driver_type']}'/>")
+        lines.append(_disk_driver_line(ed['driver_type'], ed.get('target_bus', 'virtio'), hyperv_enabled))
         if ed["type"] == "file" and ed["source_file"]:
             lines.append(f"      <source file='{ed['source_file']}'/>")
         elif ed["type"] == "block" and ed["source_dev"]:
@@ -1164,7 +1185,7 @@ def _build_edit_xml(config):
             lines.append("    </disk>")
         elif dtype == "file":
             lines.append("    <disk type='file' device='disk'>")
-            lines.append(f"      <driver name='qemu' type='{nd.get('driver_type', 'qcow2')}'/>")
+            lines.append(_disk_driver_line(nd.get('driver_type', 'qcow2'), nd.get('target_bus', 'virtio'), hyperv_enabled))
             lines.append(f"      <source file='{nd.get('source_file', '')}'/>")
             lines.append(f"      <target dev='{nd.get('target_dev', 'vdb')}' bus='{nd.get('target_bus', 'virtio')}'/>")
             lines.append("    </disk>")
@@ -1216,6 +1237,9 @@ def _build_edit_xml(config):
     elif net_type == "direct":
         lines.append(f"      <source dev='{net_source}'/>")
     lines.append(f"      <model type='{net_model}'/>")
+    if hyperv_enabled and net_model == "virtio" and _vhost_available():
+        # Windows+virtio-net時は vhost 加速 + マルチキュー (vCPU連動・上限8) (v1.8.2)。
+        lines.append(f"      <driver name='vhost' queues='{max(1, min(vcpus, 8))}'/>")
     lines.append("    </interface>")
 
     for hd in hostdevs:
@@ -2183,6 +2207,8 @@ def _build_vm_xml(config):
         lines.append("      <tlbflush state='on'/>")
         lines.append("      <ipi state='on'/>")
         lines.append("    </hyperv>")
+        # Windows時は kvm ドライバの ioapic で割り込み処理を高速化 (v1.8.2)。
+        lines.append("    <ioapic driver='kvm'/>")
     lines.append("  </features>")
     if hyperv_enabled:
         if clock_tuning:
@@ -2191,9 +2217,12 @@ def _build_vm_xml(config):
             lines.append("    <timer name='pit' tickpolicy='delay'/>")
             lines.append("    <timer name='hpet' present='no'/>")
             lines.append("    <timer name='hypervclock' present='yes'/>")
+            lines.append("    <timer name='tsc' present='yes' mode='native'/>")
             lines.append("  </clock>")
         else:
-            lines.append("  <clock offset='localtime'/>")
+            lines.append("  <clock offset='localtime'>")
+            lines.append("    <timer name='tsc' present='yes' mode='native'/>")
+            lines.append("  </clock>")
     elif clock_tuning:
         lines.append("  <clock offset='localtime'>")
         lines.append("    <timer name='rtc' tickpolicy='catchup'/>")
@@ -2214,13 +2243,13 @@ def _build_vm_xml(config):
         disk_path = config.get("_disk_path", "")
         if disk_path:
             lines.append("    <disk type='file' device='disk'>")
-            lines.append("      <driver name='qemu' type='qcow2'/>")
+            lines.append(_disk_driver_line("qcow2", disk_bus, hyperv_enabled))
             lines.append(f"      <source file='{disk_path}'/>")
             lines.append(f"      <target dev='vda' bus='{disk_bus}'/>")
             lines.append("    </disk>")
         else:
             lines.append("    <disk type='volume' device='disk'>")
-            lines.append("      <driver name='qemu' type='qcow2'/>")
+            lines.append(_disk_driver_line("qcow2", disk_bus, hyperv_enabled))
             lines.append(f"      <source pool='{disk_pool}' volume='{name}.qcow2'/>")
             lines.append(f"      <target dev='vda' bus='{disk_bus}'/>")
             lines.append("    </disk>")
@@ -2228,7 +2257,7 @@ def _build_vm_xml(config):
         existing_path = config.get("existing_disk_path", "").strip()
         if existing_path:
             lines.append("    <disk type='file' device='disk'>")
-            lines.append("      <driver name='qemu' type='qcow2'/>")
+            lines.append(_disk_driver_line("qcow2", disk_bus, hyperv_enabled))
             lines.append(f"      <source file='{existing_path}'/>")
             lines.append(f"      <target dev='vda' bus='{disk_bus}'/>")
             lines.append("    </disk>")
@@ -2270,19 +2299,19 @@ def _build_vm_xml(config):
         elif dtype == "block":
             lines.append("    <disk type='block' device='disk'>")
             driver_type = dc.get("driver_type", "raw")
-            lines.append(f"      <driver name='qemu' type='{driver_type}'/>")
-            lines.append(f"      <source dev='{dc.get('source_dev', '')}'/>")
             target_dev = dc.get("target_dev", f"vd{dev_letters[dev_idx]}")
             target_bus = dc.get("target_bus", "virtio")
+            lines.append(_disk_driver_line(driver_type, target_bus, hyperv_enabled))
+            lines.append(f"      <source dev='{dc.get('source_dev', '')}'/>")
             lines.append(f"      <target dev='{target_dev}' bus='{target_bus}'/>")
             lines.append("    </disk>")
         elif dtype == "file":
             lines.append("    <disk type='file' device='disk'>")
             driver_type = dc.get("driver_type", "qcow2")
-            lines.append(f"      <driver name='qemu' type='{driver_type}'/>")
-            lines.append(f"      <source file='{dc.get('source_file', '')}'/>")
             target_dev = dc.get("target_dev", f"vd{dev_letters[dev_idx]}")
             target_bus = dc.get("target_bus", "virtio")
+            lines.append(_disk_driver_line(driver_type, target_bus, hyperv_enabled))
+            lines.append(f"      <source file='{dc.get('source_file', '')}'/>")
             lines.append(f"      <target dev='{target_dev}' bus='{target_bus}'/>")
             lines.append("    </disk>")
         dev_idx += 1
@@ -2315,6 +2344,9 @@ def _build_vm_xml(config):
     elif net_type == "direct":
         lines.append(f"      <source dev='{net_source}'/>")
     lines.append(f"      <model type='{net_model}'/>")
+    if hyperv_enabled and net_model == "virtio" and _vhost_available():
+        # Windows+virtio-net時は vhost 加速 + マルチキュー (vCPU連動・上限8) (v1.8.2)。
+        lines.append(f"      <driver name='vhost' queues='{max(1, min(vcpus, 8))}'/>")
     lines.append("    </interface>")
 
     for hd in hostdevs:

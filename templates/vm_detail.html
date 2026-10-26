@@ -25,6 +25,9 @@
         <button class="btn btn-secondary btn-sm" onclick="vmAction('resume')"><i class="fas fa-play-circle"></i> 再開</button>
         <button class="btn btn-danger btn-sm" onclick="vmAction('undefine')"><i class="fas fa-trash"></i> 削除</button>
     </div>
+    <label style="margin-left:12px;display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--text-secondary);cursor:pointer;white-space:nowrap" title="ホストOS起動時にこのVMも自動的に起動します (libvirt autostart)">
+        <input type="checkbox" id="autostart-check" {% if vm_config.autostart %}checked{% endif %}>ホスト起動時に自動起動する
+    </label>
 </div>
 
 <div class="card console-card">
@@ -848,6 +851,21 @@ function vmAction(action) {
     .then(d => { if (d.error) alert('エラー: ' + d.error); else location.reload(); })
     .catch(err => alert('通信エラー: ' + err));
 }
+
+document.getElementById('autostart-check').addEventListener('change', function() {
+    const el = this;
+    fetch(`/api/vm/${encodeURIComponent(VM_NAME)}/autostart`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({enabled: el.checked})
+    })
+    .then(r => r.json())
+    .then(d => {
+        if (d.error) { el.checked = !el.checked; alert('エラー: ' + d.error); }
+        else { alert('ホスト起動時の自動起動を' + (d.autostart ? 'ON' : 'OFF') + 'にしました'); }
+    })
+    .catch(err => { el.checked = !el.checked; alert('通信エラー: ' + err); });
+});
 
 function saveXml() {
     const xml = document.getElementById('xml-editor').value;

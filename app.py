@@ -659,7 +659,12 @@ def vm_detail(name):
         "clock_tuning": root.find(".//clock/timer[@name='hypervclock']") is not None,
         "cpu_pinning": root.find(".//cputune/vcpupin") is not None,
         "cpu_pinning_set": "",
+        "autostart": False,
     }
+    try:
+        vm_config["autostart"] = bool(dom.autostart())
+    except Exception:
+        pass
     _vcpupin_el = root.find(".//cputune/vcpupin")
     if _vcpupin_el is not None:
         vm_config["cpu_pinning_set"] = _vcpupin_el.get("cpuset", "")
@@ -1317,6 +1322,25 @@ def _build_edit_xml(config):
     lines.append("</domain>")
 
     return "\n".join(lines)
+
+
+@app.route("/api/vm/<name>/autostart", methods=["POST"])
+def vm_autostart(name):
+    conn = get_conn()
+    try:
+        dom = conn.lookupByName(name)
+    except libvirt.libvirtError:
+        conn.close()
+        return jsonify({"error": f"VM '{name}' が見つかりません"}), 404
+
+    enabled = bool((request.json or {}).get("enabled"))
+    try:
+        dom.setAutostart(1 if enabled else 0)
+    except libvirt.libvirtError as e:
+        conn.close()
+        return jsonify({"error": f"自動起動設定の変更に失敗しました: {e}"}), 400
+    conn.close()
+    return jsonify({"success": True, "autostart": enabled})
 
 
 @app.route("/api/vm/<name>/action", methods=["POST"])

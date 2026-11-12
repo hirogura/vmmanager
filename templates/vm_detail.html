@@ -34,6 +34,8 @@
     <div class="console-header">
         <i class="fas fa-terminal" style="color:var(--text-muted)"></i>
         <span style="flex:1;font-weight:500">VNC Console</span>
+        <button type="button" id="vnc-btn-hankaku" class="btn btn-secondary btn-sm" title="半角/全角キーをVNCに送信します">半角/全角</button>
+        <button type="button" id="vnc-btn-cad" class="btn btn-secondary btn-sm" title="Ctrl+Alt+DeleteをVNCに送信します">Ctrl+Alt+Delete</button>
         <button type="button" id="vnc-btn-terminal" class="btn btn-secondary btn-sm" title="VNCの右側にSSHターミナルを表示します">ターミナル: Off</button>
         <span id="vnc-status" class="status connected">接続済み</span>
         <div style="display:flex;gap:2px">
@@ -1588,11 +1590,27 @@ async function connectVnc() {
         rfb.addEventListener('connected', onConnected);
         rfb.addEventListener('disconnected', onDisconnected);
         rfb.addEventListener('failed', onFailed);
+        vncAttachSpecialKeyHandlers();
         rfb.scaleViewport = true;
         rfb.resizeSession = isResizeEnabled();
     } catch (e) {
         setVncStatus('エラー: ' + e.message, '#e74c3c');
         scheduleReconnect();
+    }
+}
+
+function vncAttachSpecialKeyHandlers() {
+    const btnHankaku = document.getElementById('vnc-btn-hankaku');
+    const btnCad = document.getElementById('vnc-btn-cad');
+    if (btnHankaku) {
+        btnHankaku.onclick = () => {
+            if (rfb) rfb.sendKey(0xff2a); // XK_Zenkaku_Hankaku (半角/全角)
+        };
+    }
+    if (btnCad) {
+        btnCad.onclick = () => {
+            if (rfb) rfb.sendCtrlAltDel();
+        };
     }
 }
 

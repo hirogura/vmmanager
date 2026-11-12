@@ -1604,7 +1604,10 @@ function vncAttachSpecialKeyHandlers() {
     const btnCad = document.getElementById('vnc-btn-cad');
     if (btnHankaku) {
         btnHankaku.onclick = () => {
-            if (rfb) rfb.sendKey(0xff2a); // XK_Zenkaku_Hankaku (半角/全角)
+            // 半角/全角キー(XK_Zenkaku_Hankaku)を物理スキャンコード(0x29)で送信する。
+            // keysymのみだとゲスト側のキーマップ変換で反映されないため、
+            // QEMU拡張キーイベント用に物理キー名"Backquote"(同スキャンコード)を併せて渡す。
+            if (rfb) rfb.sendKey(0xff2a, "Backquote");
         };
     }
     if (btnCad) {

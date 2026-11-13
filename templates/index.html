@@ -209,7 +209,7 @@ window.addEventListener('resize', () => {
 
 function vmAction(name, action) {
     if (action === 'undefine') {
-        if (!confirm('このVMを削除しますか？')) return;
+        if (!confirm('このVMを削除しますか？\nスナップショットも一緒に削除されます。')) return;
         fetch(`/api/vm/${encodeURIComponent(name)}/disks`)
         .then(r => r.json())
         .then(data => {

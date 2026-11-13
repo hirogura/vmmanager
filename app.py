@@ -1409,6 +1409,21 @@ def vm_action(name):
                 conn.close()
                 return jsonify({"error": "先にVMを停止してください"}), 400
 
+            # スナップショットが残っていると undefine できないため、先に削除する。
+            # 外部スナップショット等で通常削除できない場合はメタデータのみ削除し、
+            # 後段の undefine --snapshots-metadata でVM自体は確実に削除する。
+            try:
+                for snap in dom.listAllSnapshots(0):
+                    try:
+                        snap.delete(0)
+                    except libvirt.libvirtError:
+                        try:
+                            snap.delete(libvirt.VIR_DOMAIN_SNAPSHOT_DELETE_METADATA_ONLY)
+                        except libvirt.libvirtError:
+                            pass
+            except libvirt.libvirtError:
+                pass
+
             delete_disk = payload.get("delete_disk", False)
             delete_disks = payload.get("delete_disks") or []
             disk_paths = []
@@ -1442,12 +1457,12 @@ def vm_action(name):
             import subprocess
             try:
                 subprocess.run(
-                    ["sudo", "virsh", "undefine", name, "--nvram"],
+                    ["sudo", "virsh", "undefine", name, "--nvram", "--snapshots-metadata"],
                     capture_output=True, timeout=10, check=True
                 )
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
                 try:
-                    dom.undefine()
+                    dom.undefine(libvirt.VIR_DOMAIN_UNDEFINE_SNAPSHOTS_METADATA)
                 except libvirt.libvirtError as ue:
                     conn.close()
                     return jsonify({"error": str(ue)}), 400

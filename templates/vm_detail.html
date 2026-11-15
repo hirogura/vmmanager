@@ -36,6 +36,7 @@
         <span style="flex:1;font-weight:500">VNC Console</span>
         <button type="button" id="vnc-btn-hankaku" class="btn btn-secondary btn-sm" title="半角/全角キーをVNCに送信します">半角/全角</button>
         <button type="button" id="vnc-btn-cad" class="btn btn-secondary btn-sm" title="Ctrl+Alt+DeleteをVNCに送信します">Ctrl+Alt+Delete</button>
+        <button type="button" id="vnc-btn-serv-ui" class="btn btn-info btn-sm" {% if vm.state != 'running' %}disabled title="VMが停止中のため無効"{% else %}title="serv/cachy-UIを新しいタブで開きます"{% endif %}>serv/cachy-UI</button>
         <button type="button" id="vnc-btn-terminal" class="btn btn-secondary btn-sm" title="VNCの右側にSSHターミナルを表示します">ターミナル: Off</button>
         <span id="vnc-status" class="status connected">接続済み</span>
         <div style="display:flex;gap:2px">
@@ -1464,6 +1465,36 @@ function vmSshDisconnect() {
 window.addEventListener('resize', () => {
     if (vmSshFit && vmSshTerm) vmSshFit.fit();
 });
+
+// serv/cachy-UI を新しいタブで開く（未導入時は通知）
+const btnVmServUi = document.getElementById('vnc-btn-serv-ui');
+if (btnVmServUi && !btnVmServUi.disabled) {
+    btnVmServUi.addEventListener('click', () => {
+        const originalText = btnVmServUi.textContent;
+        const newWindow = window.open('', '_blank');
+        btnVmServUi.disabled = true;
+        btnVmServUi.textContent = '確認中...';
+        fetch(`/api/vm/${encodeURIComponent(VM_NAME)}/serv-ui`)
+            .then(r => r.json())
+            .then(data => {
+                if (data.ok && data.url) {
+                    if (newWindow) newWindow.location.href = data.url;
+                    else window.open(data.url, '_blank');
+                } else {
+                    if (newWindow) newWindow.close();
+                    alert('serv/cachy-UI が導入されていないか、起動していません。');
+                }
+            })
+            .catch(err => {
+                if (newWindow) newWindow.close();
+                alert('通信エラー: ' + err);
+            })
+            .finally(() => {
+                btnVmServUi.disabled = false;
+                btnVmServUi.textContent = originalText;
+            });
+    });
+}
 
 // ターミナル表示切替（デフォルト Off）
 const vmTerminalPanel = document.getElementById('vm-terminal-panel');

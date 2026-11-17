@@ -1252,6 +1252,7 @@ document.addEventListener('DOMContentLoaded', function() {
     loadUsbDevices();
     loadSnapshots();
     loadVmIp();
+    vmSshAutoResume();
 });
 
 function loadVmIp() {
@@ -1367,6 +1368,9 @@ function deleteSnapshot(snapName) {
 // SSHターミナル（接続先はこのVMに固定）
 // ============================================================
 let vmSshTerm = null, vmSshFit = null, vmSshWs = null;
+let vmSshSessionId = null;               // サーバ側の永続セッションID
+let vmSshClosing = false;                // 「切断」ボタンによる明示切断中
+const vmSshStoreKey = 'vmmanager.sshSession.' + VM_NAME;
 
 function vmSshSetStatus(text, cls) {
     const el = document.getElementById('vm-ssh-status');
@@ -1383,7 +1387,34 @@ function vmSshCloseSocket(silent) {
 
 function vmSshResetButtons() {
     document.getElementById('btn-vm-ssh-connect').disabled = false;
-    document.getElementById('btn-vm-ssh-disconnect').disabled = true;
+    document.getElementById('btn-vm-ssh-disconnect').disabled = !vmSshSessionId;
+}
+
+function vmSshHandleMessage(msg) {
+    let m = null;
+    try { m = JSON.parse(msg); } catch (e) {}
+    if (!m || typeof m !== 'object') {
+        if (vmSshTerm) vmSshTerm.write(msg);
+        return;
+    }
+    if (m.type === 'session') {
+        vmSshSessionId = m.id;
+        localStorage.setItem(vmSshStoreKey, m.id);
+        document.getElementById('btn-vm-ssh-disconnect').disabled = false;
+    } else if (m.type === 'output') {
+        if (vmSshTerm) vmSshTerm.write(m.data || '');
+        vmSshSetStatus('接続済み', 'badge badge-success');
+    } else if (m.type === 'error') {
+        if (vmSshTerm) vmSshTerm.write(m.data || '');
+        vmSshSetStatus('エラー', 'badge badge-danger');
+        vmSshResetButtons();
+    } else if (m.type === 'closed') {
+        vmSshSetStatus('終了', 'badge badge-danger');
+        if (vmSshTerm) vmSshTerm.writeln('\r\n\x1b[31m[セッションが終了しました]\x1b[0m');
+        localStorage.removeItem(vmSshStoreKey);
+        vmSshSessionId = null;
+        vmSshResetButtons();
+    }
 }
 
 function vmSshConnect() {
@@ -1394,7 +1425,11 @@ function vmSshConnect() {
     const name = VM_NAME;
     const user = document.getElementById('vm-ssh-user').value.trim() || 'root';
 
+    const savedId = localStorage.getItem(vmSshStoreKey);
+    const resumed = !!savedId;
+
     vmSshCloseSocket(true);
+    vmSshClosing = false;
 
     const container = document.getElementById('vm-terminal-container');
     container.innerHTML = '';
@@ -1428,38 +1463,66 @@ function vmSshConnect() {
     });
 
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    vmSshWs = new WebSocket(`${proto}://${location.host}/ws/ssh/${encodeURIComponent(name)}?user=${encodeURIComponent(user)}`);
+    let url = `${proto}://${location.host}/ws/ssh/${encodeURIComponent(name)}?user=${encodeURIComponent(user)}`;
+    if (savedId) url += `&session=${encodeURIComponent(savedId)}`;
+    vmSshWs = new WebSocket(url);
 
-    let gotOutput = false;
     vmSshWs.onopen = () => {
-        vmSshSetStatus('接続中...', 'badge badge-warning');
+        vmSshSetStatus(resumed ? '再接続中...' : '接続中...', 'badge badge-warning');
         vmSshWs.send(JSON.stringify({type: 'resize', cols: vmSshTerm.cols, rows: vmSshTerm.rows}));
         vmSshTerm.focus();
     };
-    vmSshWs.onmessage = e => {
-        if (!gotOutput) {
-            gotOutput = true;
-            vmSshSetStatus('接続済み', 'badge badge-success');
-        }
-        vmSshTerm.write(e.data);
-    };
+    vmSshWs.onmessage = e => vmSshHandleMessage(e.data);
     vmSshWs.onclose = () => {
         vmSshWs = null;
-        vmSshSetStatus('切断', 'badge badge-danger');
-        if (vmSshTerm) vmSshTerm.writeln('\r\n\x1b[31m[接続が閉じました]\x1b[0m');
+        if (vmSshClosing) return;
+        // ブラウザ/ネットワーク側で切れただけ。サーバ側セッションは継続中。
+        vmSshSetStatus('再接続可能', 'badge badge-warning');
+        if (vmSshTerm) vmSshTerm.writeln('\r\n\x1b[33m[接続が閉じました。セッションはバックグラウンドで継続中です。\r\n「接続」で再開できます]\x1b[0m');
         vmSshResetButtons();
     };
 
     document.getElementById('btn-vm-ssh-connect').disabled = true;
-    document.getElementById('btn-vm-ssh-disconnect').disabled = false;
-    vmSshSetStatus('接続中...', 'badge badge-warning');
+    document.getElementById('btn-vm-ssh-disconnect').disabled = !savedId;
+    vmSshSetStatus(resumed ? '再接続中...' : '接続中...', 'badge badge-warning');
 }
 
 function vmSshDisconnect() {
+    vmSshClosing = true;
+    const id = vmSshSessionId || localStorage.getItem(vmSshStoreKey);
+    if (id) {
+        fetch(`/api/ssh/session/${encodeURIComponent(id)}`, {method: 'DELETE'}).catch(() => {});
+        localStorage.removeItem(vmSshStoreKey);
+    }
+    vmSshSessionId = null;
     vmSshCloseSocket(false);
     vmSshSetStatus('切断', 'badge badge-danger');
     if (vmSshTerm) vmSshTerm.writeln('\r\n\x1b[31m[切断しました]\x1b[0m');
     vmSshResetButtons();
+}
+
+function vmSshShowPanel() {
+    const panel = document.getElementById('vm-terminal-panel');
+    const btn = document.getElementById('vnc-btn-terminal');
+    if (!panel || !btn) return;
+    vmTerminalOn = true;
+    panel.classList.add('on');
+    btn.textContent = 'ターミナル: On';
+    btn.style.background = '#2980b9';
+    btn.style.borderColor = '#2980b9';
+    btn.style.color = '#fff';
+}
+
+// ブラウザ再起動後などに、このVMの生存中セッションを自動で引き継ぐ
+function vmSshAutoResume() {
+    fetch(`/api/ssh/sessions?name=${encodeURIComponent(VM_NAME)}`).then(r => r.json()).then(list => {
+        if (!Array.isArray(list) || !list.length) return;
+        const s = list[0];
+        localStorage.setItem(vmSshStoreKey, s.id);
+        if (s.user) document.getElementById('vm-ssh-user').value = s.user;
+        vmSshShowPanel();
+        vmSshConnect();
+    }).catch(() => {});
 }
 
 window.addEventListener('resize', () => {

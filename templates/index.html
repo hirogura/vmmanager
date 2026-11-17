@@ -88,6 +88,8 @@ document.addEventListener('DOMContentLoaded', function() {
             el.style.fontFamily = '';
         });
     });
+    // ブラウザを閉じて再開したとき、生存中のSSHセッションへ自動再接続する
+    sshAutoResume();
 });
 
 document.querySelectorAll('.serv-ui-btn').forEach(btn => {
@@ -107,6 +109,10 @@ document.querySelectorAll('.serv-ui-btn').forEach(btn => {
 });
 
 let sshTerm = null, sshFit = null, sshWs = null;
+let sshSessionId = null;                 // サーバ側の永続セッションID
+let sshCurrentVm = null;
+let sshClosing = false;                  // 「切断」ボタンによる明示切断中
+const sshStoreKey = name => 'vmmanager.sshSession.' + name;  // localStorageはブラウザ再起動後も残る
 
 function sshSetStatus(text, cls) {
     const el = document.getElementById('ssh-status');
@@ -123,7 +129,34 @@ function sshCloseSocket(silent) {
 
 function sshResetButtons() {
     document.getElementById('btn-ssh-connect').disabled = false;
-    document.getElementById('btn-ssh-disconnect').disabled = true;
+    document.getElementById('btn-ssh-disconnect').disabled = !sshSessionId;
+}
+
+function sshHandleMessage(msg) {
+    let m = null;
+    try { m = JSON.parse(msg); } catch (e) {}
+    if (!m || typeof m !== 'object') {           // 旧形式の生テキスト出力
+        if (sshTerm) sshTerm.write(msg);
+        return;
+    }
+    if (m.type === 'session') {
+        sshSessionId = m.id;
+        if (sshCurrentVm) localStorage.setItem(sshStoreKey(sshCurrentVm), m.id);
+        document.getElementById('btn-ssh-disconnect').disabled = false;
+    } else if (m.type === 'output') {
+        if (sshTerm) sshTerm.write(m.data || '');
+        sshSetStatus('接続済み', 'badge badge-success');
+    } else if (m.type === 'error') {
+        if (sshTerm) sshTerm.write(m.data || '');
+        sshSetStatus('エラー', 'badge badge-danger');
+        sshResetButtons();
+    } else if (m.type === 'closed') {
+        sshSetStatus('終了', 'badge badge-danger');
+        if (sshTerm) sshTerm.writeln('\r\n\x1b[31m[セッションが終了しました]\x1b[0m');
+        if (sshCurrentVm) localStorage.removeItem(sshStoreKey(sshCurrentVm));
+        sshSessionId = null;
+        sshResetButtons();
+    }
 }
 
 function sshConnect() {
@@ -134,8 +167,14 @@ function sshConnect() {
     const name = document.getElementById('ssh-vm-select').value;
     if (!name) { alert('稼働中のVMがありません'); return; }
     const user = document.getElementById('ssh-user').value.trim() || 'root';
+    sshCurrentVm = name;
+
+    // 保存済みのセッションIDがあれば再アタッチ(新しいsshは起動しない)
+    const savedId = localStorage.getItem(sshStoreKey(name));
+    const resumed = !!savedId;
 
     sshCloseSocket(true);
+    sshClosing = false;
 
     const container = document.getElementById('ssh-terminal-container');
     container.innerHTML = '';
@@ -169,38 +208,56 @@ function sshConnect() {
     });
 
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    sshWs = new WebSocket(`${proto}://${location.host}/ws/ssh/${encodeURIComponent(name)}?user=${encodeURIComponent(user)}`);
+    let url = `${proto}://${location.host}/ws/ssh/${encodeURIComponent(name)}?user=${encodeURIComponent(user)}`;
+    if (savedId) url += `&session=${encodeURIComponent(savedId)}`;
+    sshWs = new WebSocket(url);
 
-    let gotOutput = false;
     sshWs.onopen = () => {
-        sshSetStatus('接続中...', 'badge badge-warning');
+        sshSetStatus(resumed ? '再接続中...' : '接続中...', 'badge badge-warning');
         sshWs.send(JSON.stringify({type: 'resize', cols: sshTerm.cols, rows: sshTerm.rows}));
         sshTerm.focus();
     };
-    sshWs.onmessage = e => {
-        if (!gotOutput) {
-            gotOutput = true;
-            sshSetStatus('接続済み', 'badge badge-success');
-        }
-        sshTerm.write(e.data);
-    };
+    sshWs.onmessage = e => sshHandleMessage(e.data);
     sshWs.onclose = () => {
         sshWs = null;
-        sshSetStatus('切断', 'badge badge-danger');
-        if (sshTerm) sshTerm.writeln('\r\n\x1b[31m[接続が閉じました]\x1b[0m');
+        if (sshClosing) return;
+        // ブラウザ/ネットワーク側で切れただけ。サーバ側セッションは継続中。
+        sshSetStatus('再接続可能', 'badge badge-warning');
+        if (sshTerm) sshTerm.writeln('\r\n\x1b[33m[接続が閉じました。セッションはバックグラウンドで継続中です。\r\n「接続」で再開できます]\x1b[0m');
         sshResetButtons();
     };
 
     document.getElementById('btn-ssh-connect').disabled = true;
-    document.getElementById('btn-ssh-disconnect').disabled = false;
-    sshSetStatus('接続中...', 'badge badge-warning');
+    document.getElementById('btn-ssh-disconnect').disabled = !savedId;
+    sshSetStatus(resumed ? '再接続中...' : '接続中...', 'badge badge-warning');
 }
 
 function sshDisconnect() {
+    sshClosing = true;
+    const id = sshSessionId || (sshCurrentVm && localStorage.getItem(sshStoreKey(sshCurrentVm)));
+    if (id) {
+        // セッションを明示終了(ブラウザを閉じるだけでは終了しない)
+        fetch(`/api/ssh/session/${encodeURIComponent(id)}`, {method: 'DELETE'}).catch(() => {});
+        if (sshCurrentVm) localStorage.removeItem(sshStoreKey(sshCurrentVm));
+    }
+    sshSessionId = null;
     sshCloseSocket(false);
     sshSetStatus('切断', 'badge badge-danger');
     if (sshTerm) sshTerm.writeln('\r\n\x1b[31m[切断しました]\x1b[0m');
     sshResetButtons();
+}
+
+// ブラウザ再起動後などに、生存中のセッションを自動で引き継ぐ
+function sshAutoResume() {
+    fetch('/api/ssh/sessions').then(r => r.json()).then(list => {
+        if (!Array.isArray(list) || !list.length) return;
+        const s = list[0];
+        const sel = document.getElementById('ssh-vm-select');
+        if ([...sel.options].some(o => o.value === s.name)) sel.value = s.name;
+        localStorage.setItem(sshStoreKey(s.name), s.id);
+        if (s.user) document.getElementById('ssh-user').value = s.user;
+        sshConnect();
+    }).catch(() => {});
 }
 
 window.addEventListener('resize', () => {

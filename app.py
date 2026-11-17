@@ -3297,7 +3297,141 @@ def novnc_static(filename):
 
 # ============================================================
 # SSH Terminal (WebSocket + PTY)
+# v.2.2.0: SSHセッションをWebSocketの寿命から切り離して永続化する。
+# ブラウザ/タブを閉じてWSが切れても ssh プロセスと PTY は生かし続け、
+# 同じセッションIDで再接続すればスクロールバックごと復元される。
+# 終了は「切断」ボタン(DELETE /api/ssh/session/<id>)の明示操作、
+# または ssh プロセス自身の終了時のみ。
 # ============================================================
+import json
+import uuid
+
+
+class _SSHSession:
+    """1セッション = PTY + sshプロセス + 出力バッファ + 購読中のWebSocket群。"""
+
+    BUFFER_LIMIT = 256 * 1024  # スクロールバック保持上限(バイト)
+
+    def __init__(self, name, user, pid, master_fd):
+        self.id = uuid.uuid4().hex
+        self.name = name
+        self.user = user
+        self.pid = pid
+        self.master_fd = master_fd
+        self.buffer = bytearray()
+        self.buffer_lock = threading.Lock()
+        self.subscribers = set()
+        self.subscribers_lock = threading.Lock()
+        self.alive = True
+        self.reader_thread = None
+        self.created_at = time.time()
+
+    def append_output(self, data):
+        with self.buffer_lock:
+            self.buffer.extend(data)
+            overflow = len(self.buffer) - self.BUFFER_LIMIT
+            if overflow > 0:
+                del self.buffer[:overflow]
+
+    def buffer_text(self):
+        with self.buffer_lock:
+            return bytes(self.buffer).decode("utf-8", errors="replace")
+
+    def add_subscriber(self, ws):
+        with self.subscribers_lock:
+            self.subscribers.add(ws)
+
+    def remove_subscriber(self, ws):
+        with self.subscribers_lock:
+            self.subscribers.discard(ws)
+
+    def broadcast(self, message):
+        """全購読WSへ送信。失敗した購読者は取り除く。
+        ロックを保持したまま送ることで、再接続時の初期送信
+        (セッションID + スクロールバック)との順序が入れ替わらないようにする。"""
+        with self.subscribers_lock:
+            for ws in list(self.subscribers):
+                try:
+                    ws.send(message)
+                except Exception:
+                    self.subscribers.discard(ws)
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "name": self.name,
+            "user": self.user,
+            "created_at": self.created_at,
+        }
+
+
+_ssh_sessions = {}
+_ssh_sessions_lock = threading.Lock()
+
+
+def _get_ssh_session(session_id):
+    with _ssh_sessions_lock:
+        s = _ssh_sessions.get(session_id)
+    if s and not s.alive:
+        return None
+    return s
+
+
+def _terminate_ssh_session(session_id, notify=True):
+    """セッションを終了させ、ssh プロセスを確実に停止・回収する。"""
+    import signal
+    with _ssh_sessions_lock:
+        session = _ssh_sessions.pop(session_id, None)
+    if session is None:
+        return False
+    session.alive = False
+    if notify:
+        session.broadcast(json.dumps(
+            {"type": "closed", "reason": "セッションが終了しました"},
+            ensure_ascii=False))
+    with session.subscribers_lock:
+        session.subscribers.clear()
+    # 子(ssh)を終了させると PTY マスターの read が EOF/EIO で抜ける。
+    for sig in (signal.SIGHUP, signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.kill(session.pid, sig)
+        except OSError:
+            break
+        time.sleep(0.05)
+    try:
+        os.waitpid(session.pid, os.WNOHANG)
+    except (OSError, ChildProcessError):
+        pass
+    try:
+        os.close(session.master_fd)
+    except OSError:
+        pass
+    return True
+
+
+def _ssh_reader_loop(session):
+    """ssh 出力を読み続け、バッファへ蓄積しつつ購読WSへ配信する。
+    購読者が0でも動作し続けるため、ブラウザを閉じても接続が維持される。"""
+    try:
+        while session.alive:
+            try:
+                data = os.read(session.master_fd, 4096)
+            except OSError:
+                break
+            if not data:
+                break
+            session.append_output(data)
+            session.broadcast(json.dumps(
+                {"type": "output",
+                 "data": data.decode("utf-8", errors="replace")},
+                ensure_ascii=False))
+    except Exception:
+        pass
+    finally:
+        # ssh が自ら終了した場合もセッションを片付ける。
+        _terminate_ssh_session(session.id, notify=True)
+
+
 def _vm_ssh_ip(name):
     import subprocess
     import re
@@ -3319,12 +3453,10 @@ def _vm_ssh_ip(name):
 
 @sock.route("/ws/ssh/<name>")
 def ws_ssh(ws, name):
-    import json
     import pty
     import fcntl
     import termios
     import struct
-    import signal
     import re
 
     conn = get_conn()
@@ -3337,50 +3469,72 @@ def ws_ssh(ws, name):
     finally:
         conn.close()
     if active is None:
-        ws.send(f"\x1b[31mVM '{name}' が見つかりません\x1b[0m")
+        ws.send(json.dumps(
+            {"type": "error", "data": f"\x1b[31mVM '{name}' が見つかりません\x1b[0m"},
+            ensure_ascii=False))
         return
 
     user = request.args.get("user", "root")
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9._-]*\$?", user):
-        ws.send("\x1b[31m不正なユーザー名です\x1b[0m")
+        ws.send(json.dumps(
+            {"type": "error", "data": "\x1b[31m不正なユーザー名です\x1b[0m"},
+            ensure_ascii=False))
         return
 
-    ip = _vm_ssh_ip(name) if active else None
-    if not ip:
-        ws.send("\x1b[31mIPアドレスを取得できません（VMが稼働していないか、ネットワーク未接続です）\x1b[0m")
-        return
+    # 再接続: 生存中のセッションIDが指定されれば再アタッチし、sshを起動し直さない。
+    requested = (request.args.get("session") or "").strip()
+    session = _get_ssh_session(requested) if requested else None
+    if session is not None and (session.name != name or session.user != user):
+        session = None
 
-    ssh_cmd = [
-        "ssh",
-        "-o", "StrictHostKeyChecking=no",
-        "-o", "UserKnownHostsFile=/dev/null",
-        "-o", "ConnectTimeout=10",
-        f"{user}@{ip}",
-    ]
+    if session is None:
+        ip = _vm_ssh_ip(name) if active else None
+        if not ip:
+            ws.send(json.dumps(
+                {"type": "error",
+                 "data": "\x1b[31mIPアドレスを取得できません（VMが稼働していないか、ネットワーク未接続です）\x1b[0m"},
+                ensure_ascii=False))
+            return
 
-    pid, master_fd = pty.fork()
-    if pid == 0:
-        env = os.environ.copy()
-        env["TERM"] = "xterm-256color"
-        env.pop("SSH_AUTH_SOCK", None)
+        ssh_cmd = [
+            "ssh",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+            "-o", "ConnectTimeout=10",
+            f"{user}@{ip}",
+        ]
+
+        pid, master_fd = pty.fork()
+        if pid == 0:
+            env = os.environ.copy()
+            env["TERM"] = "xterm-256color"
+            env.pop("SSH_AUTH_SOCK", None)
+            try:
+                os.execvpe(ssh_cmd[0], ssh_cmd, env)
+            except Exception:
+                pass
+            os._exit(127)
+
+        session = _SSHSession(name, user, pid, master_fd)
+        with _ssh_sessions_lock:
+            _ssh_sessions[session.id] = session
+        session.reader_thread = threading.Thread(
+            target=_ssh_reader_loop, args=(session,), daemon=True)
+        session.reader_thread.start()
+
+    # このWSを購読者に登録し、セッションIDと過去出力を最初に送る。
+    # ロックを保持したまま送ることで reader の配信と順序が入れ替わらない。
+    with session.subscribers_lock:
+        snapshot = session.buffer_text()
+        session.subscribers.add(ws)
         try:
-            os.execvpe(ssh_cmd[0], ssh_cmd, env)
+            ws.send(json.dumps({"type": "session", "id": session.id}))
+            if snapshot:
+                ws.send(json.dumps({"type": "output", "data": snapshot},
+                                   ensure_ascii=False))
         except Exception:
-            pass
-        os._exit(127)
-
-    def _pty_reader():
-        try:
-            while True:
-                data = os.read(master_fd, 4096)
-                if not data:
-                    break
-                ws.send(data.decode("utf-8", errors="replace"))
-        except Exception:
-            pass
-
-    reader_thread = threading.Thread(target=_pty_reader, daemon=True)
-    reader_thread.start()
+            session.subscribers.discard(ws)
+            return
 
     try:
         while True:
@@ -3391,36 +3545,46 @@ def ws_ssh(ws, name):
                 data = json.loads(msg)
             except (ValueError, TypeError):
                 continue
+            if not isinstance(data, dict):
+                continue
             try:
-                if data.get("type") == "input":
-                    os.write(master_fd, str(data.get("data", "")).encode("utf-8"))
-                elif data.get("type") == "resize":
+                mtype = data.get("type")
+                if mtype == "input":
+                    os.write(session.master_fd, str(data.get("data", "")).encode("utf-8"))
+                elif mtype == "resize":
                     winsize = struct.pack(
                         "HHHH",
                         int(data.get("rows", 24)),
                         int(data.get("cols", 80)),
                         0, 0,
                     )
-                    fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize)
-            except (OSError, ValueError):
+                    fcntl.ioctl(session.master_fd, termios.TIOCSWINSZ, winsize)
+            except (OSError, ValueError, TypeError):
                 pass
     except Exception:
         pass
     finally:
-        try:
-            os.close(master_fd)
-        except OSError:
-            pass
-        for sig in (signal.SIGHUP, signal.SIGTERM, signal.SIGKILL):
-            try:
-                os.kill(pid, sig)
-            except OSError:
-                break
-            time.sleep(0.05)
-        try:
-            os.waitpid(pid, os.WNOHANG)
-        except (OSError, ChildProcessError):
-            pass
+        # ブラウザを閉じただけでは終了しない。購読を外すだけに留める。
+        session.remove_subscriber(ws)
+
+
+@app.route("/api/ssh/sessions")
+def api_ssh_sessions():
+    """稼働中のSSHセッション一覧 (ブラウザ再開時の自動再接続用)。"""
+    name = request.args.get("name")
+    with _ssh_sessions_lock:
+        sessions = [s.to_dict() for s in _ssh_sessions.values() if s.alive]
+    if name:
+        sessions = [s for s in sessions if s["name"] == name]
+    sessions.sort(key=lambda s: s["created_at"], reverse=True)
+    return jsonify(sessions)
+
+
+@app.route("/api/ssh/session/<session_id>", methods=["DELETE"])
+def api_ssh_session_delete(session_id):
+    """「切断」ボタン用。SSHセッションを明示的に終了する。"""
+    ok = _terminate_ssh_session(session_id, notify=True)
+    return jsonify({"success": ok})
 
 
 @app.route("/api/server/restart", methods=["POST"])

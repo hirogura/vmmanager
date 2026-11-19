@@ -35,6 +35,7 @@
         <i class="fas fa-terminal" style="color:var(--text-muted)"></i>
         <span style="flex:1;font-weight:500">VNC Console</span>
         <button type="button" id="vnc-btn-hankaku" class="btn btn-secondary btn-sm" title="半角/全角キーをVNCに送信します">半角/全角</button>
+        <button type="button" id="vnc-btn-eisu" class="btn btn-secondary btn-sm" title="英数キー(ゲストの日本語入力を英字に切り替え)をVNCに送信します">英数</button>
         <button type="button" id="vnc-btn-cad" class="btn btn-secondary btn-sm" title="Ctrl+Alt+DeleteをVNCに送信します">Ctrl+Alt+Delete</button>
         <button type="button" id="vnc-btn-serv-ui" class="btn btn-info btn-sm" {% if vm.state != 'running' %}disabled title="VMが停止中のため無効"{% else %}title="serv/cachy-UIを新しいタブで開きます"{% endif %}>serv/cachy-UI</button>
         <button type="button" id="vnc-btn-terminal" class="btn btn-secondary btn-sm" title="VNCの右側にSSHターミナルを表示します">ターミナル: Off</button>
@@ -238,6 +239,16 @@
             <div class="form-group">
                 <label>リッスン</label>
                 <input type="text" name="vnc_listen" value="{{ vm_config.vnc_listen }}" {% if is_active %}disabled{% endif %}>
+            </div>
+            <div class="form-group" title="VNCのkeysymを物理キーへ変換するテーブルです。ゲスト側のキーボードレイアウトに合わせてください">
+                <label>キーマップ</label>
+                <select name="vnc_keymap" {% if is_active %}disabled{% endif %} style="padding:4px 8px;font-size:11px">
+                    {% if vm_config.vnc_keymap not in ['en-us', 'ja'] %}
+                    <option value="{{ vm_config.vnc_keymap }}" selected>{{ vm_config.vnc_keymap }} (現在)</option>
+                    {% endif %}
+                    <option value="en-us" {% if vm_config.vnc_keymap == 'en-us' %}selected{% endif %}>英語 (en-us / 既定)</option>
+                    <option value="ja" {% if vm_config.vnc_keymap == 'ja' %}selected{% endif %}>日本語 (ja)</option>
+                </select>
             </div>
         </div>
     </div>
@@ -775,6 +786,7 @@ async function collectFormData() {
         vnc_enabled: fd.has('vnc_enabled'),
         vnc_port: fd.get('vnc_port'),
         vnc_listen: fd.get('vnc_listen'),
+        vnc_keymap: fd.get('vnc_keymap'),
         spice_enabled: fd.has('spice_enabled'),
         spice_port: fd.get('spice_port'),
         spice_tls_port: fd.get('spice_tls_port'),
@@ -1695,6 +1707,7 @@ async function connectVnc() {
 
 function vncAttachSpecialKeyHandlers() {
     const btnHankaku = document.getElementById('vnc-btn-hankaku');
+    const btnEisu = document.getElementById('vnc-btn-eisu');
     const btnCad = document.getElementById('vnc-btn-cad');
     if (btnHankaku) {
         btnHankaku.onclick = () => {
@@ -1702,6 +1715,15 @@ function vncAttachSpecialKeyHandlers() {
             // keysymのみだとゲスト側のキーマップ変換で反映されないため、
             // QEMU拡張キーイベント用に物理キー名"Backquote"(同スキャンコード)を併せて渡す。
             if (rfb) rfb.sendKey(0xff2a, "Backquote");
+        };
+    }
+    if (btnEisu) {
+        btnEisu.onclick = () => {
+            // 英数キー(XK_Eisu_toggle)を送信する。
+            // noVNCは"Eisu"のスキャンコードを持たないため、物理キー名"CapsLock"(AT 0x3a)を
+            // 併せて渡し、QEMU拡張キーイベントで英数と同じ物理キーを注入する。
+            // (QEMU ja keymap: Eisu_toggle 0x3a / XKB jp: <CAPS> = Eisu_toggle)
+            if (rfb) rfb.sendKey(0xff30, "CapsLock");
         };
     }
     if (btnCad) {

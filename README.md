@@ -1,6 +1,6 @@
 # VM Manager
 
-libvirt / QEMU 上の仮想マシンを Web ブラウザから管理するための Web UI です（現在のバージョン: **v.2.2.0**）。
+libvirt / QEMU 上の仮想マシンを Web ブラウザから管理するための Web UI です（現在のバージョン: **v.2.3.0**）。
 
 ## 概要
 
@@ -31,7 +31,7 @@ libvirt / QEMU 上の仮想マシンを Web ブラウザから管理するため
 - 設定可能な項目:
   - ドメイン種別 (kvm/qemu)、アーキテクチャ (x86_64 / aarch64)、マシンタイプ（Q35 / i440fx 等を capabilities から取得）
   - vCPU / メモリ、ブート順序、複数のディスク（file / block / volume / network）、ISO CD-ROM
-  - UEFI / **Secure Boot**、TPM (swtpm)、VNC / SPICE（TLS や各種オプション）、ビデオ (virtio/qxl/cirrus)、サウンド (ich9)
+  - UEFI / **Secure Boot**、TPM (swtpm)、VNC / SPICE（TLS や各種オプション、**VNC キーマップ** en-us / ja）、ビデオ (virtio/qxl/cirrus)、サウンド (ich9)
   - ネットワーク（network / bridge / direct + モデル + MAC）、USB デバイス / PCI ホストデバイスのパススルー、USB リダイレクタ
 - **Hyper-V 拡張**（relaxed / vapic / spinlocks / vpindex / synic / stimer / tlbflush / ipi 等）と **クロック調整** (`localtime`、RTC/PIT/HPET/TSC)、**CPU ピンニング** (cpuset) に対応
 - Hyper-V 有効時に **Windows 11 向け高速化**を自動適用（`ioapic driver='kvm'`、TSC native、virtio ディスクの `discard='unmap'`、vhost-net マルチキュー）
@@ -53,7 +53,8 @@ libvirt / QEMU 上の仮想マシンを Web ブラウザから管理するため
 ### VNC コンソール (noVNC)
 
 - 詳細画面に埋め込み表示、または standalone コンソール画面 (`/vm/<name>/console`) で利用
-- 自動再接続、**半角/全角キー送信**（物理スキャンコード `Backquote` 0x29）、**Ctrl+Alt+Delete** 送信、クリップボード貼り付け
+- 自動再接続、**半角/全角キー送信**（物理スキャンコード `Backquote` 0x29）、**英数キー送信**（`CapsLock` 0x3a / XK_Eisu_toggle）、**Ctrl+Alt+Delete** 送信、クリップボード貼り付け
+- VNC のキーマップを VM ごとに `en-us` / `ja` から選択可能（keysym → 物理キー変換テーブル。ゲスト側のキーボードレイアウトと合わせて設定）
 - 画面サイズのプリセット（小/中/大、localStorage に保存）、全画面表示、「画面Off」オーバーレイ、解像度リサイズ切替
 
 ### SSH ターミナル

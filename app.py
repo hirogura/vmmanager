@@ -647,6 +647,7 @@ def vm_detail(name):
         "vnc_enabled": False,
         "vnc_port": "-1",
         "vnc_listen": "0.0.0.0",
+        "vnc_keymap": "en-us",
         "spice_enabled": False,
         "spice_port": "-1",
         "spice_listen": "0.0.0.0",
@@ -700,6 +701,7 @@ def vm_detail(name):
             vm_config["vnc_enabled"] = True
             vm_config["vnc_port"] = g.get("port", "-1")
             vm_config["vnc_listen"] = g.get("listen_address", g.get("listen", "0.0.0.0"))
+            vm_config["vnc_keymap"] = g.get("keymap") or "en-us"
         elif g["type"] == "spice":
             vm_config["spice_enabled"] = True
             vm_config["spice_port"] = g.get("port", "-1")
@@ -823,6 +825,7 @@ def _parse_devices(root):
             "tlsPort": graphics.get("tlsPort", ""),
             "autoport": graphics.get("autoport", ""),
             "listen": graphics.get("listen", ""),
+            "keymap": graphics.get("keymap", ""),
         }
         listen_el = graphics.find("listen")
         if listen_el is not None:
@@ -987,6 +990,23 @@ def vm_edit(name):
         return jsonify({"error": str(e)}), 400
 
 
+def _normalize_vnc_keymap(value):
+    """VNC キーマップ名を安全な値に正規化する (既定: en-us)。
+
+    QEMU の -k / libvirt の graphics keymap に渡す値なので、XML 注入を防ぐため
+    既存の keymap ファイル名かどうかも確認する。
+    """
+    import re
+    name = value.strip() if isinstance(value, str) else ""
+    if not name or not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", name):
+        return "en-us"
+    for keymap_dir in ("/usr/share/qemu/keymaps", "/usr/share/qemu-kvm/keymaps"):
+        if os.path.isfile(os.path.join(keymap_dir, name)):
+            return name
+    # keymap ファイルが見つからない環境でも既定値だけは許可する
+    return name if name in ("en-us", "ja") else "en-us"
+
+
 def _build_edit_xml(config):
     name = config.get("name", "")
     domain_type = config.get("domain_type", "kvm")
@@ -1011,6 +1031,7 @@ def _build_edit_xml(config):
     except (ValueError, TypeError):
         vnc_port = "-1"
     vnc_listen = config.get("vnc_listen", "") or "0.0.0.0"
+    vnc_keymap = _normalize_vnc_keymap(config.get("vnc_keymap"))
     spice_enabled = config.get("spice_enabled", False)
     spice_port = config.get("spice_port", "") or "-1"
     try:
@@ -1214,7 +1235,7 @@ def _build_edit_xml(config):
             iso_idx += 1
 
     if vnc_enabled:
-        lines.append(f"    <graphics type='vnc' port='{vnc_port}' autoport='yes' listen='{vnc_listen}'>")
+        lines.append(f"    <graphics type='vnc' port='{vnc_port}' autoport='yes' listen='{vnc_listen}' keymap='{vnc_keymap}'>")
         lines.append(f"      <listen type='address' address='{vnc_listen}'/>")
         lines.append("    </graphics>")
 
@@ -2144,6 +2165,7 @@ def _build_vm_xml(config):
     except (ValueError, TypeError):
         vnc_port = "-1"
     vnc_listen = config.get("vnc_listen", "") or "0.0.0.0"
+    vnc_keymap = _normalize_vnc_keymap(config.get("vnc_keymap"))
     vnc_passwd = config.get("vnc_passwd", "")
 
     spice_enabled = config.get("spice_enabled", False)
@@ -2355,7 +2377,7 @@ def _build_vm_xml(config):
             lines.append("    </disk>")
         dev_idx += 1
 
-    lines.append(f"    <graphics type='vnc' port='{vnc_port}' autoport='yes' listen='{vnc_listen}'>")
+    lines.append(f"    <graphics type='vnc' port='{vnc_port}' autoport='yes' listen='{vnc_listen}' keymap='{vnc_keymap}'>")
     lines.append(f"      <listen type='address' address='{vnc_listen}'/>")
     lines.append("    </graphics>")
 

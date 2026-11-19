@@ -335,9 +335,9 @@
             <input type="checkbox" name="usb_redirector_2" id="usb_redirector_2" {% if vm_config.usb_redirector_2 %}checked{% endif %} {% if is_active %}disabled{% endif %}>
             <label for="usb_redirector_2">USB転送 x2</label>
         </div>
-        <div class="form-group" style="margin:0" title="VNCのkeysymを物理キーへ変換するテーブルです。ゲスト側のキーボードレイアウトに合わせてください">
-            <label>キーマップ</label>
-            <select name="vnc_keymap" {% if is_active %}disabled{% endif %} style="padding:4px 8px;font-size:11px">
+        <div class="form-group" style="margin:4px 0 0;padding:4px 0;display:flex;align-items:center;gap:6px" title="VNCのkeysymを物理キーへ変換するテーブルです。ゲスト側のキーボードレイアウトに合わせてください">
+            <label for="vnc_keymap" style="display:inline;margin:0;white-space:nowrap;font-size:12px">キーマップ</label>
+            <select id="vnc_keymap" name="vnc_keymap" {% if is_active %}disabled{% endif %} style="width:auto;padding:3px 6px;font-size:11px">
                 {% if vm_config.vnc_keymap not in ['en-us', 'ja'] %}
                 <option value="{{ vm_config.vnc_keymap }}" selected>{{ vm_config.vnc_keymap }} (現在)</option>
                 {% endif %}

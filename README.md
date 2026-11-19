@@ -1,6 +1,6 @@
 # VM Manager
 
-libvirt / QEMU 上の仮想マシンを Web ブラウザから管理するための Web UI です（現在のバージョン: **v.2.3.0**）。
+libvirt / QEMU 上の仮想マシンを Web ブラウザから管理するための Web UI です（現在のバージョン: **v.2.3.1**）。
 
 ## 概要
 

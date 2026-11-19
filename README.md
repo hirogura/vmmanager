@@ -1,6 +1,6 @@
 # VM Manager
 
-libvirt / QEMU 上の仮想マシンを Web ブラウザから管理するための Web UI です（現在のバージョン: **v.2.3.1**）。
+libvirt / QEMU 上の仮想マシンを Web ブラウザから管理するための Web UI です（現在のバージョン: **v.2.4.0**）。
 
 ## 概要
 
@@ -53,7 +53,8 @@ libvirt / QEMU 上の仮想マシンを Web ブラウザから管理するため
 ### VNC コンソール (noVNC)
 
 - 詳細画面に埋め込み表示、または standalone コンソール画面 (`/vm/<name>/console`) で利用
-- 自動再接続、**半角/全角キー送信**（物理スキャンコード `Backquote` 0x29）、**英数キー送信**（`CapsLock` 0x3a / XK_Eisu_toggle）、**Ctrl+Alt+Delete** 送信、クリップボード貼り付け
+- 自動再接続、**半角/全角キー送信**（物理スキャンコード `Backquote` 0x29）、**英数キー送信**（`CapsLock` 0x3a / XK_Eisu_toggle）、**Ctrl+Alt+Delete** 送信
+- **クリップボード送信**（`ClientCutText`）: HTTPS 環境では OS のクリップボードを直接読み取り、不可の場合はテキスト入力ダイアログにフォールバック（ゲスト側への一方向）
 - VNC のキーマップを VM ごとに `en-us` / `ja` から選択可能（keysym → 物理キー変換テーブル。ゲスト側のキーボードレイアウトと合わせて設定）
 - 画面サイズのプリセット（小/中/大、localStorage に保存）、全画面表示、「画面Off」オーバーレイ、解像度リサイズ切替
 

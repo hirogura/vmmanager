@@ -36,6 +36,7 @@
         <span style="flex:1;font-weight:500">VNC Console</span>
         <button type="button" id="vnc-btn-hankaku" class="btn btn-secondary btn-sm" title="半角/全角キーをVNCに送信します">半角/全角</button>
         <button type="button" id="vnc-btn-eisu" class="btn btn-secondary btn-sm" title="英数キー(ゲストの日本語入力を英字に切り替え)をVNCに送信します">英数</button>
+        <button type="button" id="vnc-btn-clipboard" class="btn btn-secondary btn-sm" title="クリップボードの内容をVNC先に送信します"><i class="fas fa-paste"></i> クリップボード</button>
         <button type="button" id="vnc-btn-cad" class="btn btn-secondary btn-sm" title="Ctrl+Alt+DeleteをVNCに送信します">Ctrl+Alt+Delete</button>
         <button type="button" id="vnc-btn-serv-ui" class="btn btn-info btn-sm" {% if vm.state != 'running' %}disabled title="VMが停止中のため無効"{% else %}title="serv/cachy-UIを新しいタブで開きます"{% endif %}>serv/cachy-UI</button>
         <button type="button" id="vnc-btn-terminal" class="btn btn-secondary btn-sm" title="VNCの右側にSSHターミナルを表示します">ターミナル: Off</button>
@@ -1708,6 +1709,7 @@ async function connectVnc() {
 function vncAttachSpecialKeyHandlers() {
     const btnHankaku = document.getElementById('vnc-btn-hankaku');
     const btnEisu = document.getElementById('vnc-btn-eisu');
+    const btnClipboard = document.getElementById('vnc-btn-clipboard');
     const btnCad = document.getElementById('vnc-btn-cad');
     if (btnHankaku) {
         btnHankaku.onclick = () => {
@@ -1724,6 +1726,26 @@ function vncAttachSpecialKeyHandlers() {
             // 併せて渡し、QEMU拡張キーイベントで英数と同じ物理キーを注入する。
             // (QEMU ja keymap: Eisu_toggle 0x3a / XKB jp: <CAPS> = Eisu_toggle)
             if (rfb) rfb.sendKey(0xff30, "CapsLock");
+        };
+    }
+    if (btnClipboard) {
+        btnClipboard.onclick = async () => {
+            if (!rfb) return;
+            let text = null;
+            try {
+                // HTTPS (Tailscale serve) 経由ならOSのクリップボードを直接読む
+                if (navigator.clipboard && navigator.clipboard.readText) {
+                    text = await navigator.clipboard.readText();
+                }
+            } catch (e) {
+                // 権限拒否・非対応ブラウザの場合はpromptにフォールバック
+            }
+            if (text === null || text === undefined) {
+                text = prompt('貼り付けテキスト:');
+            }
+            if (text && typeof rfb.clipboardPasteFrom === 'function') {
+                rfb.clipboardPasteFrom(text);
+            }
         };
     }
     if (btnCad) {
